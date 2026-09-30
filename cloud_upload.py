@@ -30,7 +30,6 @@ def generate_script_with_gemini(theme, genre, tone):
 
     client = genai.Client(api_key=api_key)
     
-    # f-stringではなく通常の文字列結合を使用し、構文エラーを完全に防止
     prompt = (
         "あなたはプロのAIアニメ・ドラマ脚本家です。\n"
         "以下の条件をもとに、YouTubeのAIドラマ・解説動画用のデータを完全にオリジナルの世界観で作成してください。\n"
@@ -81,7 +80,7 @@ def generate_script_with_gemini(theme, genre, tone):
                 }
 
 def create_voice_audio(scenes):
-    """各シーンの台本を結合して1つの高品質な音声（mp3）を生成"""
+    """各シーンの台本を結合して音声（mp3）を生成"""
     print("🎙 ナレーション音声をシーンごとに生成・結合中...")
     
     combined_script = ""
@@ -107,8 +106,8 @@ def find_japanese_font():
     return ""
 
 def create_ai_drama_video(audio_path, metadata):
-    """FFmpegを使用して、シネマティックな背景・字幕・音声を完全同期させた本格動画を作成"""
-    print("🎬 本格的な動画・字幕の合成処理を開始します...")
+    """FFmpegを使用して、音声を1.5倍速に早送りしつつ動画・字幕を合成"""
+    print("🎬 本格的な動画・字幕の合成処理（音声1.5倍速）を開始します...")
     output_path = "ai_drama_output.mp4"
     
     font_path = find_japanese_font()
@@ -116,16 +115,19 @@ def create_ai_drama_video(audio_path, metadata):
     
     font_opt = f"fontfile={font_path}:" if font_path else ""
     
-    # FFmpegコマンドで複数シーンの字幕を焼き込む
+    # FFmpegの音声フィルターで atempo=1.5 を指定して1.5倍速にする
     cmd = [
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", "color=c=0x11071f:s=1280x720:r=30",
         "-i", audio_path,
         "-filter_complex", 
+        f"[1:a]atempo=1.5[aout];" \
         f"drawtext={font_opt}text='{title}':fontcolor=0x00ffff:fontsize=42:x=(w-text_w)/2:y=80:enable='between(t,0,999)'," \
         f"drawtext={font_opt}text='{metadata['scenes'][0]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=350:enable='between(t,0,10)'," \
         f"drawtext={font_opt}text='{metadata['scenes'][1]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=430:enable='between(t,10,22)'," \
         f"drawtext={font_opt}text='{metadata['scenes'][2]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=510:enable='between(t,22,45)'",
+        "-map", "0:v",
+        "-map", "[aout]",
         "-c:v", "libx264", "-c:a", "aac",
         "-af", "apad=pad_dur=2.0",
         "-shortest",
@@ -134,7 +136,7 @@ def create_ai_drama_video(audio_path, metadata):
     ]
     
     subprocess.run(cmd, check=True)
-    print("✨ フルスペックAIドラマ動画の生成が完了しました！")
+    print("✨ 1.5倍速のフルスペックAIドラマ動画の生成が完了しました！")
     return output_path
 
 def upload_to_youtube(video_path, metadata):
@@ -183,7 +185,7 @@ def main():
     if not input_theme:
         raise ValueError("❌ スプレッドシートのA2セル（テーマ）が空です。")
         
-    print(f"🎯 フルスペックAIドラマ制作開始 -> テーマ: {input_theme} (ジャンル: {input_genre}, 雰囲気: {input_tone})")
+    print(f"🎯 1.5倍速AIドラマ制作開始 -> テーマ: {input_theme} (ジャンル: {input_genre}, 雰囲気: {input_tone})")
     
     metadata = generate_script_with_gemini(input_theme, input_genre, input_tone)
     audio_path = create_voice_audio(metadata["scenes"])
