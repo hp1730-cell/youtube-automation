@@ -33,7 +33,6 @@ TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge")  # edge / gtts
 EDGE_VOICE = os.environ.get("EDGE_VOICE", "ja-JP-NanamiNeural")  # 男性声: ja-JP-KeitaNeural
 PRIVACY = os.environ.get("PRIVACY_STATUS", "unlisted")  # private / unlisted / public
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
-ALLOW_FALLBACK = os.environ.get("ALLOW_FALLBACK", "false").strip().lower() == "true"  # 台本生成失敗時に定型台本で続行するか
 
 WIDTH, HEIGHT, FPS = 1280, 720, 30
 BG_COLOR = "0x2b1055"  # 深い紫。vignetteで周辺が暗くなりグラデーション風になる
@@ -99,18 +98,6 @@ def build_prompt(theme, genre, tone):
     )
 
 
-def fallback_drama(theme, genre):
-    return {
-        "title": f"【{genre}】{theme}"[:100],
-        "description": f"{theme}を描く完全オリジナルAIドラマ。#{genre} #AIドラマ #オリジナル",
-        "scenes": [
-            f"静寂に包まれた世界。今回は{theme}をめぐる、誰も見たことのない物語をお届けします。",
-            "定められた運命の歯車が、音を立てて動き始めます。隠された真実とは一体何なのでしょうか。",
-            "扉の向こうに広がっていたのは、想像を絶する景色でした。物語は、ここから新たな局面を迎えます。",
-        ],
-    }
-
-
 def generate_script_with_gemini(theme, genre, tone):
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -151,10 +138,7 @@ def generate_script_with_gemini(theme, genre, tone):
                 wait = 5 * (2**attempt)
                 log(f"⏳ {wait}秒後にリトライします...")
                 time.sleep(wait)
-    if ALLOW_FALLBACK:
-        log("⚠️ 定型のフォールバック台本を使用します。")
-        return fallback_drama(theme, genre)
-    raise RuntimeError("台本を生成できなかったため中断しました(定型動画の投稿を防ぐため)。")
+    raise RuntimeError("台本を生成できなかったため中断しました。")
 
 
 # ---------------------------------------------------------------- ナレーション
