@@ -25,6 +25,7 @@ MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 SPEED = float(os.environ.get("NARRATION_SPEED", "1.5"))  # ナレーション速度
 PRIVACY = os.environ.get("PRIVACY_STATUS", "unlisted")  # private / unlisted / public
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
+ALLOW_FALLBACK = os.environ.get("ALLOW_FALLBACK", "false").strip().lower() == "true"  # 台本生成失敗時に定型台本で続行するか
 
 WIDTH, HEIGHT, FPS = 1280, 720, 30
 BG_COLOR = "0x2b1055"  # 深い紫。vignetteで周辺が暗くなりグラデーション風になる
@@ -132,13 +133,20 @@ def generate_script_with_gemini(theme, genre, tone):
                 "scenes": scenes,
             }
         except Exception as e:
-            log(f"⚠️ 台本生成エラー: {e}")
+            msg = str(e)
+            log(f"⚠️ 台本生成エラー: {msg[:300]}")
+            if "PerDay" in msg:
+                # 1日の無料枠切れ。リトライしても回復しないので即中断(リトライ自体が枠を消費するため)
+                log("❌ Geminiの1日あたりの利用上限に達しています。リトライせず中断します。")
+                break
             if attempt < max_retries - 1:
                 wait = 5 * (2**attempt)
                 log(f"⏳ {wait}秒後にリトライします...")
                 time.sleep(wait)
-    log("❌ フォールバック台本を使用します。")
-    return fallback_drama(theme, genre)
+    if ALLOW_FALLBACK:
+        log("⚠️ 定型のフォールバック台本を使用します。")
+        return fallback_drama(theme, genre)
+    raise RuntimeError("台本を生成できなかったため中断しました(定型動画の投稿を防ぐため)。")
 
 
 # ---------------------------------------------------------------- ナレーション
@@ -320,6 +328,10 @@ def upload_to_youtube(video_path, metadata):
             if status:
                 log(f"   アップロード中 {int(status.progress() * 100)}%")
         except HttpError as e:
+            if "uploadLimitExceeded" in str(e):
+                log("❌ YouTubeチャンネルの投稿上限に達しています。時間をおくか、チャンネルの電話番号認証を行ってください。")
+                log(f"📁 動画は {video_path} に生成済みです(Actionsの成果物からダウンロードできます)。")
+                raise
             if e.resp.status in (500, 502, 503, 504) and retries < 5:
                 retries += 1
                 time.sleep(2**retries)
