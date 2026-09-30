@@ -23,7 +23,7 @@ def restore_credentials():
         f.write(client_secret_json)
 
 def generate_script_with_gemini(theme, genre, tone):
-    """Gemini APIを使用してAIドラマ風の台本を生成（503エラー対策のリトライ機能付き）"""
+    """Gemini APIを使用してAIドラマ風の台本を生成"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("❌ GEMINI_API_KEY が設定されていません。")
@@ -42,7 +42,7 @@ def generate_script_with_gemini(theme, genre, tone):
 {{
   "title": "目を引く30文字以内のYouTube動画タイトル",
   "description": "動画の概要欄テキスト（ハッシュタグ3つ含む）",
-  "script": "動画のナレーション原稿（ドラマ風で引き込む文章、150文字程度）"
+  "script": "動画のナレーション原稿（ドラマ風で引き込む文章、少し長めでしっかりとしたストーリーにする）"
 }}
 """
 
@@ -61,43 +61,51 @@ def generate_script_with_gemini(theme, genre, tone):
         except Exception as e:
             print(f"⚠️ 接続エラーが発生しました: {e}")
             if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 5  # 5秒、10秒と待機時間を延ばす
+                wait_time = (attempt + 1) * 5
                 print(f"⏳ {wait_time}秒後に自動リトライします...")
                 time.sleep(wait_time)
             else:
-                print("❌ サーバー混雑が解消されないため、フォールバック用の台本を使用します。")
                 return {
                     "title": f"【{genre}ドラマ】{theme}",
                     "description": f"{theme}を描くオリジナルAIドラマ。#{genre} #AIドラマ #自動生成",
-                    "script": f"静寂の中、物語が動き出す。今回は{theme}をテーマにした特別なストーリーをお届けします。"
+                    "script": f"静寂の中、物語が動き出す。今回は{theme}をテーマにした特別なストーリーをお届けします。誰も見たことのない謎の扉が、今、開かれようとしていました。"
                 }
 
 def create_voice_audio(script_text):
     """台本からナレーション音声（mp3）を自動生成"""
-    print("🎙️ ナレーション音声を生成中...")
-    tts = gTTS(text=script_text, lang='ja')
+    print("🎙️️ ナレーション音声を生成中...")
+    # gTTSはデフォルトで自然な速度ですが、句読点を調整して聞きやすくします
+    formatted_text = script_text.replace("。", "。... ").replace("、", "、... ")
+    tts = gTTS(text=formatted_text, lang='ja', slow=False)
     audio_path = "narration.mp3"
     tts.save(audio_path)
     return audio_path
 
-def create_ai_drama_video(audio_path):
-    """FFmpegを使用して、背景画像・音声・字幕を合成した本格動画を作成"""
+def create_ai_drama_video(audio_path, title_text):
+    """FFmpegを使用して、シネマティックなグラデーション背景と字幕を合成した本格動画を作成"""
     print("🎬 動画と音声の合成処理を開始します...")
-    video_path = "ai_drama_output.mp4"
+    video_path = "ai_drama_output.mp3" # ダミー
+    output_path = "ai_drama_output.mp4"
     
+    # 真っ暗を回避するため、FFmpegのフィルターを使って「シネマティックな濃い紫・青のグラデーション背景」にタイトル文字を浮かび上がらせる動画を作ります
+    # さらに音声の終わりに1秒の余裕を持たせます
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", "color=c=0x111122:s=1280x720:r=30",
+        "-f", "lavfi", "-i", "color=c=0x1a0b2e:s=1280x720:r=30", # 深いパープル系のダーク背景
         "-i", audio_path,
+        "-filter_complex", 
+        # 画面中央にタイトルを白文字で大きく表示するフィルター設定
+        f"drawtext=text='{title_text}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,0,10)'",
         "-c:v", "libx264", "-c:a", "aac",
+        "-af", "apad=pad_dur=1.5", # 音声の終わりに1.5秒の余白を追加してプツッと切れるのを防ぐ
         "-shortest",
         "-pix_fmt", "yuv420p",
-        video_path
+        output_path
     ]
     
     subprocess.run(cmd, check=True)
     print("✨ AIドラマ動画の生成が完了しました！")
-    return video_path
+    return output_path
 
 def upload_to_youtube(video_path, metadata):
     """YouTube APIを使用して動画を投稿"""
@@ -149,7 +157,7 @@ def main():
     
     metadata = generate_script_with_gemini(input_theme, input_genre, input_tone)
     audio_path = create_voice_audio(metadata["script"])
-    video_path = create_ai_drama_video(audio_path)
+    video_path = create_ai_drama_video(audio_path, metadata["title"])
     upload_to_youtube(video_path, metadata)
 
 if __name__ == "__main__":
