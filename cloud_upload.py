@@ -164,7 +164,7 @@ GENRE_GUIDES = {
     "生活・ライフハック": "悩み→原因→具体的な方法→注意点→使い分け。視聴者が実践できる情報を重視する。",
     "商品・サービス解説": "何ができるか→特徴→メリット・注意点→向いている人→比較・使い方。宣伝文句だけにしない。",
     "都市伝説・ミステリー": "確認済み情報と伝承・推測を明確に分け、断定しない。謎が深まる構成にする。",
-    "人物": "人物の経歴→重要な出来事→具体的なエピソード→周囲への影響→現在までの流れ。",
+    "人物": "人物の経歴→重要な事象→具体的なエピソード→周囲への影響→現在までの流れ。",
     "その他": "視聴者が疑問を持つ順番に、基礎→具体例→深掘り→意外なポイント→まとめで構成する。",
 }
 
@@ -177,9 +177,6 @@ def gemini_client():
 
 
 def model_candidates():
-    # 現行の利用可能モデルを優先し、古いgemini-2.5-flashは候補から除外する。
-    # 3.5 Flash-Liteは高頻度処理向け、3.1 Flash-Liteはフォールバック、
-    # 3.8 Flashは品質優先の最終候補。
     result = []
     for name in [
         MODEL,
@@ -202,8 +199,6 @@ def _error_status(error):
 def call_structured(client, prompt, schema, *, use_search=False, max_output_tokens=12000, temperature=0.65):
     last_error = None
     for model_name in model_candidates():
-        # 404は即座に次のモデルへ。429は12秒待って1回だけ再試行し、
-        # それでも駄目なら次のモデルへ。5xx等の一時障害も1回再試行する。
         attempts = 2
         for attempt in range(attempts):
             try:
@@ -586,6 +581,7 @@ YouTube動画の台本を{action}してください。
         "sources": research.get("sources", []),
     }
 
+
 # ---------------------------------------------------------------- AI画像＆サムネイル生成
 def generate_images_for_scenes(visual_style, scenes):
     IMAGE_DIR.mkdir(exist_ok=True)
@@ -610,13 +606,11 @@ def create_thumbnail(title, bg_image_path, font_path):
     thumb_path = WORK_DIR / "thumbnail.jpg"
     try:
         img = Image.open(bg_image_path).convert("RGBA")
-        # 暗いグラデーションを重ねて文字の視認性を上げる
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 110))
         img = Image.alpha_composite(img, overlay)
         draw = ImageDraw.Draw(img)
         font = ImageFont.truetype(font_path, 80)
         
-        # タイトル描画（縁取り付き）
         lines = "\n".join(title[i:i + 15] for i in range(0, len(title), 15)).split("\n")
         y = HEIGHT // 2 - (len(lines) * 90) // 2
         for line in lines:
@@ -627,10 +621,8 @@ def create_thumbnail(title, bg_image_path, font_path):
                 w = draw.textlength(line, font=font) if hasattr(draw, "textlength") else 80 * len(line)
                 
             x = (WIDTH - w) // 2
-            # 黒い縁取り
             for offset_x, offset_y in [(-4,-4), (4,-4), (-4,4), (4,4), (-4,0), (4,0), (0,-4), (0,4)]:
                 draw.text((x + offset_x, y + offset_y), line, font=font, fill="black")
-            # メイン文字色（黄色）
             draw.text((x, y), line, font=font, fill="yellow")
             y += 90
             
@@ -686,7 +678,6 @@ def probe_duration(path):
 
 
 def create_bgm(duration, out_path):
-    """FFmpegのシンセサイザーでシネマティックな低音環境音(BGM)を自動生成"""
     log("🎵 シネマティックBGMを生成中...")
     run([
         "ffmpeg", "-y", "-f", "lavfi",
@@ -817,7 +808,6 @@ def create_video(narration, timeline, total_audio, title, scenes):
     output_path = WORK_DIR / "ai_drama_output.mp4"
     total = total_audio + TAIL
 
-    # 1. BGMの生成と音声の事前ミックス（ナレーション＋BGM）
     bgm_path = WORK_DIR / "bgm.wav"
     create_bgm(total, bgm_path)
     
@@ -829,7 +819,6 @@ def create_video(narration, timeline, total_audio, title, scenes):
         str(final_audio)
     ], timeout=120)
 
-    # 2. 映像セグメントの作成
     bounds = scene_frame_bounds(timeline, len(scenes), total)
     segments = []
     for i in range(len(scenes)):
@@ -842,7 +831,6 @@ def create_video(narration, timeline, total_audio, title, scenes):
     list_file = WORK_DIR / "segments.txt"
     list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in segments), encoding="utf-8")
 
-    # 3. 字幕フィルターの作成
     title_file = write_text_file("title.txt", wrap_text(title, 20))
     speech_start, speech_end = timeline[0]["start"], timeline[-1]["end"]
     filters = [
@@ -855,7 +843,6 @@ def create_video(narration, timeline, total_audio, title, scenes):
             f"drawtext=fontfile={font}:textfile={sub_file}:expansion=none:fontcolor=white:fontsize=40:line_spacing=12:borderw=2:bordercolor=black:x=(w-text_w)/2:y=h-205:enable='between(t,{clip['start']:.2f},{clip['end']:.2f})'"
         )
 
-    # 4. 最終合成
     run([
         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-i", str(final_audio),
         "-vf", ",".join(filters), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
@@ -907,7 +894,6 @@ def upload_to_youtube(video_path, thumbnail_path, metadata):
         log("=" * 40)
         log(f"🎉 アップロード成功！ 🔗 URL: https://youtu.be/{response['id']}")
         
-        # サムネイル設定
         if thumbnail_path and Path(thumbnail_path).exists():
             log("🖼 サムネイルを設定中...")
             try:
@@ -965,23 +951,19 @@ def main():
 
     (WORK_DIR / "script.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 3. 最終台本が決まってから画像生成
+    # 3. AI背景画像の全自動生成
     generate_images_for_scenes(metadata["visual_style"], metadata["scenes"])
-
+    
     # 4. サムネイル生成
     thumbnail_path = None
     scene1_image = find_scene_image(1)
     if scene1_image:
         thumbnail_path = create_thumbnail(metadata["title"], scene1_image, find_japanese_font())
 
-    # 5. 最終台本でナレーションを再生成（調整後の内容を確実に反映）
-    scene_texts = [sc["text"] for sc in metadata["scenes"]]
-    narration, timeline, total_audio = create_narration(scene_texts)
-
-    # 6. 動画合成
+    # 5. 動画と字幕の結合
     video_path = create_video(narration, timeline, total_audio, metadata["title"], metadata["scenes"])
 
-    # 7. YouTube投稿
+    # 6. 投稿
     upload_to_youtube(video_path, thumbnail_path, metadata)
 
 
