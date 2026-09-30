@@ -106,7 +106,7 @@ def find_japanese_font():
     return ""
 
 def create_ai_drama_video(audio_path, metadata):
-    """FFmpegを使用して、音声を1.5倍速に早送りしつつ動画・字幕を合成"""
+    """FFmpegを使用して、音声を1.5倍速にしつつ動画・字幕を合成（エラー対策済み）"""
     print("🎬 本格的な動画・字幕の合成処理（音声1.5倍速）を開始します...")
     output_path = "ai_drama_output.mp4"
     
@@ -115,21 +115,23 @@ def create_ai_drama_video(audio_path, metadata):
     
     font_opt = f"fontfile={font_path}:" if font_path else ""
     
-    # FFmpegの音声フィルターで atempo=1.5 を指定して1.5倍速にする
+    # フィルター内でatempoとapadを同時に処理するように修正
+    filter_complex = (
+        f"[1:a]atempo=1.5,apad=pad_dur=2.0[aout];" \
+        f"[0:v]drawtext={font_opt}text='{title}':fontcolor=0x00ffff:fontsize=42:x=(w-text_w)/2:y=80:enable='between(t,0,999)'," \
+        f"drawtext={font_opt}text='{metadata['scenes'][0]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=350:enable='between(t,0,10)'," \
+        f"drawtext={font_opt}text='{metadata['scenes'][1]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=430:enable='between(t,10,22)'," \
+        f"drawtext={font_opt}text='{metadata['scenes'][2]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=510:enable='between(t,22,45)'[vout]"
+    )
+
     cmd = [
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", "color=c=0x11071f:s=1280x720:r=30",
         "-i", audio_path,
-        "-filter_complex", 
-        f"[1:a]atempo=1.5[aout];" \
-        f"drawtext={font_opt}text='{title}':fontcolor=0x00ffff:fontsize=42:x=(w-text_w)/2:y=80:enable='between(t,0,999)'," \
-        f"drawtext={font_opt}text='{metadata['scenes'][0]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=350:enable='between(t,0,10)'," \
-        f"drawtext={font_opt}text='{metadata['scenes'][1]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=430:enable='between(t,10,22)'," \
-        f"drawtext={font_opt}text='{metadata['scenes'][2]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=510:enable='between(t,22,45)'",
-        "-map", "0:v",
+        "-filter_complex", filter_complex,
+        "-map", "[vout]",
         "-map", "[aout]",
         "-c:v", "libx264", "-c:a", "aac",
-        "-af", "apad=pad_dur=2.0",
         "-shortest",
         "-pix_fmt", "yuv420p",
         output_path
