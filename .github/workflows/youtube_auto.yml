@@ -52,6 +52,7 @@ jobs:
         env:
           TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: 'gemini-3.5-flash-lite'
           INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
           INPUT_VIDEO_GENRE: ${{ github.event.inputs.video_genre }}
           INPUT_VIDEO_TONE: ${{ github.event.inputs.video_tone }}
