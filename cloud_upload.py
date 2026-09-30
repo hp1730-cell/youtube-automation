@@ -39,7 +39,7 @@ except ImportError:
 # ---------------------------------------------------------------- 設定
 WORK_DIR = Path("work")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-SPEED = float(os.environ.get("NARRATION_SPEED", "1.5"))
+SPEED = float(os.environ.get("NARRATION_SPEED", "1.25"))
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge")
 EDGE_VOICE = os.environ.get("EDGE_VOICE", "ja-JP-NanamiNeural")
 PRIVACY = os.environ.get("PRIVACY_STATUS", "unlisted")
@@ -87,7 +87,7 @@ def restore_credentials():
     Path("token.json").write_text(token_json, encoding="utf-8")
 
 
-# ---------------------------------------------------------------- 台本生成
+# ---------------------------------------------------------------- 適応型AI台本生成
 class Scene(BaseModel):
     text: str
     image_prompt: str
@@ -100,85 +100,458 @@ class Drama(BaseModel):
     scenes: list[Scene]
 
 
-def build_prompt(theme, genre, tone):
-    return (
-        "あなたはYouTubeで数十万回再生される長編AIアニメドラマのプロ脚本家です。\n"
-        "以下の条件に従い、再生時間が8分〜10分（ナレーション文字数：3,200〜4,000文字）となる、非常に見ごたえのある長編AIドラマ台本を作成してください。\n\n"
-        "【厳格な禁止事項】\n"
-        "・「静寂に包まれた」「運命の歯車」のような抽象的なポエム・雰囲気だけの文章は一切禁止。\n"
-        "・実在の人物、既存作品のキャラ、商標権・著作権に触れる固有名詞は一切使用禁止。\n\n"
-        "【長編ドラマの構成ルール】\n"
-        f"- メインテーマ: {theme}\n"
-        f"- ジャンル: {genre}\n"
-        f"- トーン: {tone}\n\n"
-        "【構成指定（全16〜20シーン）】\n"
-        "1. 【第1〜3シーン（導入・引き）】: 衝撃的な事件、理不尽な状況、または強い問いかけから始まり、視聴者の手を止めさせる。\n"
-        "2. 【第4〜10シーン（展開・対話）】: 登場人物同士のリアルな掛け合い・セリフ（「〜」）を多用し、人間関係の対立や伏線を深める。\n"
-        "3. 【第11〜16シーン（クライマックス・逆転）】: 隠された真実の発覚、怒涛の展開、または見事な解決（スカッと展開など）。\n"
-        "4. 【第17〜20シーン（結末・余韻）】: 納得感のある結末と、深い余韻を残す後日談。\n\n"
-        "【各シーンの条件】\n"
-        "- title: 目を引く30文字以内のタイトル\n"
-        "- description: 動画の概要(ハッシュタグ3つを含む)\n"
-        "- visual_style: 全シーン共通の画風と登場人物の外見の固定設定(英語)。\n"
-        "・1シーンにつき、ナレーション文（text）は200文字程度（話し言葉の3〜5文）。\n"
-        "・1シーンにつき、画風と構図を英語で指定したAI画像プロンプト（image_prompt）を具体的に記述する。\n\n"
-        "出力フォーマットは必ずJSONのみとし、Markdown表記や余計な解説は含めないでください。\n"
-    )
+class GenrePlan(BaseModel):
+    genre: str
+    needs_web_research: bool
+    structure: str
+    target_sections: int
+    audience_angle: str
 
 
-def generate_script_with_gemini(theme, genre, tone):
+class ResearchItem(BaseModel):
+    topic: str
+    facts: list[str]
+    cautions: list[str]
+
+
+class ResearchPack(BaseModel):
+    summary: str
+    items: list[ResearchItem]
+
+
+class OutlineSection(BaseModel):
+    section_title: str
+    purpose: str
+    key_points: list[str]
+    target_chars: int
+
+
+class VideoOutline(BaseModel):
+    sections: list[OutlineSection]
+    hook: str
+    ending: str
+
+
+class ScriptSection(BaseModel):
+    section_title: str
+    text: str
+    image_prompt: str
+
+
+class ScriptPackage(BaseModel):
+    title: str
+    description: str
+    visual_style: str
+    sections: list[ScriptSection]
+
+
+class ScriptReview(BaseModel):
+    needs_revision: bool
+    reasons: list[str]
+    missing_points: list[str]
+    repetition_points: list[str]
+    factual_warnings: list[str]
+
+
+GENRE_GUIDES = {
+    "AIドラマ": "登場人物、事件、対立、伏線、逆転、結末を重視。事実解説ではなく物語として構成する。",
+    "雑学": "複数の具体的な知識を扱い、なぜそうなのか、具体例、意外性まで説明する。単なる事実の羅列は禁止。",
+    "動物・雑学": "動物の行動や身体の特徴を、理由・科学的背景・具体例とともに説明する。",
+    "科学・テクノロジー": "結論→仕組み→具体例→身近な影響→意外なポイントの順で、専門用語には簡単な説明を付ける。",
+    "歴史": "出来事の背景→経緯→転換点→結果→現在から見た意味を時系列で説明する。",
+    "ニュース・時事": "確認できる事実→背景→関係者の発表や反応→影響→今後確認すべき点。推測と事実を混同しない。",
+    "ランキング": "順位ごとに理由・具体例・比較軸を説明する。単に名前を並べない。",
+    "生活・ライフハック": "悩み→原因→具体的な方法→注意点→使い分け。視聴者が実践できる情報を重視する。",
+    "商品・サービス解説": "何ができるか→特徴→メリット・注意点→向いている人→比較・使い方。宣伝文句だけにしない。",
+    "都市伝説・ミステリー": "確認済み情報と伝承・推測を明確に分け、断定しない。謎が深まる構成にする。",
+    "人物": "人物の経歴→重要な出来事→具体的なエピソード→周囲への影響→現在までの流れ。",
+    "その他": "視聴者が疑問を持つ順番に、基礎→具体例→深掘り→意外なポイント→まとめで構成する。",
+}
+
+
+def gemini_client():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("❌ GEMINI_API_KEY が設定されていません。")
-    client = genai.Client(api_key=api_key)
+    return genai.Client(api_key=api_key)
 
-    models_to_try = [MODEL, "gemini-2.5-flash", "gemini-1.5-flash"]
-    
-    for model_name in models_to_try:
-        log(f"🤖 8〜10分長尺台本を生成中... (モデル: {model_name})")
+
+def model_candidates():
+    result = []
+    for name in [MODEL, "gemini-3.8-flash", "gemini-2.5-flash"]:
+        if name and name not in result:
+            result.append(name)
+    return result
+
+
+def call_structured(client, prompt, schema, *, use_search=False, max_output_tokens=12000, temperature=0.65):
+    last_error = None
+    for model_name in model_candidates():
         for attempt in range(2):
             try:
+                tools = None
+                if use_search:
+                    tools = [types.Tool(google_search=types.GoogleSearch())]
+                config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    tools=tools,
+                )
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=build_prompt(theme, genre, tone),
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=Drama,
-                        temperature=0.85,
-                        max_output_tokens=8192,
-                    ),
+                    contents=prompt,
+                    config=config,
                 )
-                data = json.loads(response.text)
-                scenes = [
-                    {"text": sc["text"].strip(), "image_prompt": (sc.get("image_prompt") or "").strip()}
-                    for sc in data["scenes"] if sc.get("text", "").strip()
-                ]
-                if len(scenes) >= 8 and data.get("title"):
-                    log(f"✨ 8〜10分長尺台本の生成に成功しました！（全{len(scenes)}シーン）")
-                    return {
-                        "title": data["title"].strip()[:100],
-                        "description": data.get("description", "").strip(),
-                        "visual_style": (data.get("visual_style") or "").strip(),
-                        "scenes": scenes,
-                    }
+                if getattr(response, "parsed", None) is not None:
+                    parsed = response.parsed
+                    if isinstance(parsed, BaseModel):
+                        return parsed, response
+                return schema.model_validate_json(response.text), response
             except Exception as e:
-                log(f"⚠️ API応答エラー ({model_name}): {str(e)[:150]}")
-                time.sleep(3)
+                last_error = e
+                log(f"⚠️ Gemini処理エラー ({model_name}, attempt {attempt + 1}): {str(e)[:180]}")
+                time.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"Gemini処理に失敗しました: {last_error}")
 
-    log("❌ 長尺台本の自動生成に失敗したため、バックアップ用台本に切り替えます。")
-    fallback_scenes = []
-    for i in range(1, 16):
-        fallback_scenes.append({
-            "text": f"第{i}幕の展開です。{theme}をめぐる物語は、予想もしない展開へと進んでいきます。果たして、この先に待ち受ける真実とは何なのでしょうか。",
-            "image_prompt": f"cinematic scene {i} about {theme}, highly detailed anime style"
-        })
+
+def classify_theme(client, theme, requested_genre):
+    forced = (requested_genre or "").strip()
+    if forced and forced not in ("自動判定", "auto", "AUTO"):
+        genre = forced
+        if genre not in GENRE_GUIDES:
+            genre = "その他"
+        return GenrePlan(
+            genre=genre,
+            needs_web_research=genre not in ("AIドラマ",),
+            structure=GENRE_GUIDES.get(genre, GENRE_GUIDES["その他"]),
+            target_sections=10,
+            audience_angle="初見の視聴者にも理解できるようにする",
+        )
+
+    prompt = f"""
+あなたはYouTube動画の企画編集者です。
+テーマを分析し、最適な動画ジャンルと構成を決めてください。
+
+テーマ：{theme}
+
+候補ジャンル：
+AIドラマ、雑学、動物・雑学、科学・テクノロジー、歴史、ニュース・時事、ランキング、
+生活・ライフハック、商品・サービス解説、都市伝説・ミステリー、人物、その他
+
+ルール：
+- テーマそのものから判断する。
+- 事実確認が必要なテーマ、現在の情報、数字、ニュース、人物、商品情報などは needs_web_research=true。
+- 完全な創作ドラマだけは false。
+- structureには、そのジャンルに最適な動画の説明構造を具体的に書く。
+- target_sectionsは8〜12。
+"""
+    plan, _ = call_structured(client, prompt, GenrePlan, max_output_tokens=3000, temperature=0.2)
+    if plan.genre not in GENRE_GUIDES:
+        plan.genre = "その他"
+    if not plan.structure:
+        plan.structure = GENRE_GUIDES[plan.genre]
+    plan.target_sections = max(8, min(12, plan.target_sections))
+    return plan
+
+
+def extract_grounding_sources(response):
+    sources = []
+    try:
+        metadata = response.candidates[0].grounding_metadata
+        chunks = getattr(metadata, "grounding_chunks", None) or []
+        for chunk in chunks:
+            web = getattr(chunk, "web", None)
+            if web:
+                title = getattr(web, "title", "") or ""
+                uri = getattr(web, "uri", "") or ""
+                if uri and uri not in [x["url"] for x in sources]:
+                    sources.append({"title": title, "url": uri})
+    except Exception:
+        pass
+    return sources[:10]
+
+
+def research_theme(client, theme, plan):
+    if not plan.needs_web_research:
+        return {"summary": "創作テーマのためWeb調査なし", "items": [], "sources": []}
+
+    guide = GENRE_GUIDES.get(plan.genre, GENRE_GUIDES["その他"])
+    prompt = f"""
+YouTube動画の台本作成前に、テーマについて事実調査をしてください。
+Google検索を使い、できるだけ一次情報・公的機関・研究機関・公式情報を優先してください。
+
+テーマ：{theme}
+ジャンル：{plan.genre}
+構成方針：{guide}
+
+重要ルール：
+- 台本に使えそうな具体的事実を複数集める。
+- 数字、日付、因果関係は特に慎重に扱う。
+- 情報源によって見解が分かれる場合は、その違いが分かるようにする。
+- 確認できない噂や断定できない情報は事実として扱わない。
+- 同じ内容を言い換えただけの項目を大量に作らない。
+- 台本のために必要な情報を十分な量集める。
+"""
+    pack, response = call_structured(
+        client, prompt, ResearchPack, use_search=True,
+        max_output_tokens=10000, temperature=0.25
+    )
+    data = pack.model_dump()
+    data["sources"] = extract_grounding_sources(response)
+    log(f"🔎 Web調査完了: {len(pack.items)}項目 / 情報源{len(data['sources'])}件")
+    return data
+
+
+def build_outline(client, theme, plan, research, tone):
+    research_text = json.dumps(research, ensure_ascii=False, indent=2)
+    guide = GENRE_GUIDES.get(plan.genre, GENRE_GUIDES["その他"])
+    prompt = f"""
+あなたはYouTubeの構成作家です。
+以下のテーマについて、8〜10分の動画になる詳細な構成を作ってください。
+
+テーマ：{theme}
+ジャンル：{plan.genre}
+トーン：{tone}
+ジャンル別構成方針：{guide}
+
+目標：
+- 8〜10分のナレーションに十分な情報密度を持たせる。
+- 目安として8〜12セクション。
+- 各セクションには具体的な役割と複数のポイントを入れる。
+- 同じことを言い換えて水増ししない。
+- 冒頭30〜45秒は特に引き込む。
+- 最後は内容を回収し、単なる「いかがでしたか」で終わらない。
+
+調査情報：
+{research_text}
+"""
+    outline, _ = call_structured(client, prompt, VideoOutline, max_output_tokens=7000, temperature=0.45)
+    if not outline.sections:
+        raise RuntimeError("❌ 動画構成が空です。")
+    return outline
+
+
+def generate_sections(client, theme, plan, outline, research, tone):
+    research_text = json.dumps(research, ensure_ascii=False, indent=2)
+    guide = GENRE_GUIDES.get(plan.genre, GENRE_GUIDES["その他"])
+    sections = []
+    total_target = sum(max(250, s.target_chars) for s in outline.sections)
+    log(f"✍️ セクション別台本生成開始: {len(outline.sections)}セクション / 目標約{total_target}文字")
+
+    for i, section in enumerate(outline.sections, start=1):
+        prompt = f"""
+あなたはYouTube長尺動画のプロライターです。
+動画全体の一部である第{i}セクションだけを書いてください。
+
+テーマ：{theme}
+ジャンル：{plan.genre}
+トーン：{tone}
+ジャンル構成：{guide}
+セクション名：{section.section_title}
+このセクションの目的：{section.purpose}
+入れるべきポイント：{json.dumps(section.key_points, ensure_ascii=False)}
+目標文字数：約{section.target_chars}文字
+
+調査情報：
+{research_text}
+
+執筆ルール：
+- ナレーションとして自然な日本語にする。
+- 視聴者が「なぜ？」「つまりどういうこと？」と思う部分を具体的に説明する。
+- 事実と推測を混ぜない。
+- 調査情報にない具体的数字や固有の事実を勝手に追加しない。
+- 同じ内容を言い換えて水増ししない。
+- 専門用語を使う場合は、その意味を簡単に説明する。
+- 「ここからは」「いかがでしたか」などの機械的なつなぎを乱用しない。
+- ドラマ以外では無意味なセリフを入れない。
+- このセクションだけで完結させず、前後と自然につながる文章にする。
+- 画像プロンプトは、このセクションの内容を視覚化できる英語で具体的に書く。
+"""
+        result, _ = call_structured(
+            client, prompt, ScriptSection,
+            max_output_tokens=5000, temperature=0.65
+        )
+        result.section_title = section.section_title
+        sections.append(result.model_dump())
+        log(f"  ✅ セクション{i}/{len(outline.sections)} 完了: {len(result.text)}文字")
+
+    return sections
+
+
+def assemble_script(client, theme, plan, outline, sections, research, tone):
+    combined = "\n\n".join(f"【{s['section_title']}】\n{s['text']}" for s in sections)
+    prompt = f"""
+以下のセクション台本を元に、YouTube動画のタイトルと概要欄を作成してください。
+内容そのものを大幅に書き換えず、タイトル・概要欄の品質を高めることに集中してください。
+
+テーマ：{theme}
+ジャンル：{plan.genre}
+トーン：{tone}
+
+台本：
+{combined}
+
+ルール：
+- タイトルはクリックしたくなるが、内容を誇張しすぎない。
+- 概要欄は動画内容を自然に要約する。
+- ハッシュタグを3〜5個含める。
+- visual_styleは全シーンで統一できる英語の画風設定を書く。
+"""
+    class Meta(BaseModel):
+        title: str
+        description: str
+        visual_style: str
+    meta, _ = call_structured(client, prompt, Meta, max_output_tokens=3000, temperature=0.55)
     return {
-        "title": f"【長編AIドラマ】{theme}",
-        "description": f"{theme}を描く完全オリジナル長編AIアニメドラマ。#{genre} #AIドラマ #長編アニメ",
-        "visual_style": "Japanese anime style, cinematic lighting, masterpiece, 8k",
-        "scenes": fallback_scenes
+        "title": meta.title.strip()[:100],
+        "description": meta.description.strip(),
+        "visual_style": meta.visual_style.strip() or "cinematic documentary style, highly detailed, natural lighting",
+        "genre": plan.genre,
+        "scenes": sections,
+        "sources": research.get("sources", []),
     }
 
+
+def review_script(client, theme, plan, script, research):
+    script_text = "\n\n".join(f"【{s['section_title']}】\n{s['text']}" for s in script["scenes"])
+    prompt = f"""
+YouTube動画の公開前レビューをしてください。
+
+テーマ：{theme}
+ジャンル：{plan.genre}
+
+台本：
+{script_text}
+
+調査情報：
+{json.dumps(research, ensure_ascii=False, indent=2)}
+
+以下だけを確認してください：
+- 明らかな事実誤認
+- 調査情報にない断定的な事実の追加
+- 同じ内容の繰り返し
+- 話の飛躍
+- 8〜10分動画として情報が薄い部分
+- 冒頭の引きが弱い部分
+- 結論が弱い部分
+
+問題がなければ needs_revision=false にしてください。
+"""
+    review, _ = call_structured(client, prompt, ScriptReview, max_output_tokens=5000, temperature=0.2)
+    return review
+
+
+def revise_script(client, theme, plan, script, review, research, tone):
+    script_text = "\n\n".join(f"【{s['section_title']}】\n{s['text']}" for s in script["scenes"])
+    prompt = f"""
+YouTube動画の台本を修正してください。
+
+テーマ：{theme}
+ジャンル：{plan.genre}
+トーン：{tone}
+
+現在の台本：
+{script_text}
+
+レビュー：
+{review.model_dump_json(ensure_ascii=False)}
+
+調査情報：
+{json.dumps(research, ensure_ascii=False, indent=2)}
+
+ルール：
+- 問題のある部分だけを改善し、良い部分は維持する。
+- 事実を新しく追加する場合は調査情報に根拠があるものだけ。
+- 内容の薄さを改善する場合、単なる言い換えではなく具体例・背景・理由を追加する。
+- セクション数は維持する。
+- 各セクションのimage_promptも内容に合わせて維持・修正する。
+"""
+    result, _ = call_structured(client, prompt, ScriptPackage, max_output_tokens=16000, temperature=0.55)
+    return {
+        "title": result.title.strip()[:100],
+        "description": result.description.strip(),
+        "visual_style": result.visual_style.strip(),
+        "genre": plan.genre,
+        "scenes": [x.model_dump() for x in result.sections],
+        "sources": research.get("sources", []),
+    }
+
+
+def generate_script_with_gemini(theme, genre, tone):
+    client = gemini_client()
+    log("🧠 テーマを分析しています...")
+    plan = classify_theme(client, theme, genre)
+    log(f"📚 判定ジャンル: {plan.genre} / Web調査: {'あり' if plan.needs_web_research else 'なし'}")
+
+    research = research_theme(client, theme, plan)
+    (WORK_DIR / "research.json").write_text(json.dumps(research, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    log("🧩 動画構成を設計しています...")
+    outline = build_outline(client, theme, plan, research, tone)
+    (WORK_DIR / "outline.json").write_text(json.dumps(outline.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    sections = generate_sections(client, theme, plan, outline, research, tone)
+    script = assemble_script(client, theme, plan, outline, sections, research, tone)
+
+    log("🔍 台本をレビューしています...")
+    review = review_script(client, theme, plan, script, research)
+    if review.needs_revision:
+        log(f"🛠️ 修正が必要: {len(review.reasons)}件。再生成します...")
+        script = revise_script(client, theme, plan, script, review, research, tone)
+    else:
+        log("✅ 台本レビューOK")
+
+    total_chars = sum(len(s["text"]) for s in script["scenes"])
+    log(f"📝 台本完成: {total_chars}文字 / {len(script['scenes'])}セクション")
+    return script
+
+
+def adjust_script_to_duration(client, theme, plan, script, research, tone, actual_seconds):
+    min_seconds = 8 * 60
+    max_seconds = 10 * 60
+    if min_seconds <= actual_seconds <= max_seconds:
+        return script
+
+    if actual_seconds < min_seconds:
+        action = "増補"
+        instruction = "短いセクションを中心に、具体例・背景・理由・比較などを追加して内容を厚くしてください。単なる言い換えは禁止です。"
+        target = "8〜10分に届くように"
+    else:
+        action = "圧縮"
+        instruction = "重複、冗長な表現、重要度の低い説明を削り、内容の核を維持してください。"
+        target = "10分以内になるように"
+
+    script_text = "\n\n".join(f"【{s['section_title']}】\n{s['text']}" for s in script["scenes"])
+    prompt = f"""
+YouTube動画の台本を{action}してください。
+現在のナレーション実測時間：{actual_seconds:.1f}秒
+目標：{target}
+テーマ：{theme}
+ジャンル：{plan.genre}
+トーン：{tone}
+
+台本：
+{script_text}
+
+指示：
+{instruction}
+
+調査情報：
+{json.dumps(research, ensure_ascii=False, indent=2)}
+
+セクション数は維持してください。
+"""
+    result, _ = call_structured(client, prompt, ScriptPackage, max_output_tokens=18000, temperature=0.45)
+    return {
+        "title": result.title.strip()[:100],
+        "description": result.description.strip(),
+        "visual_style": result.visual_style.strip(),
+        "genre": plan.genre,
+        "scenes": [x.model_dump() for x in result.sections],
+        "sources": research.get("sources", []),
+    }
 
 # ---------------------------------------------------------------- AI画像＆サムネイル生成
 def generate_images_for_scenes(visual_style, scenes):
@@ -473,7 +846,7 @@ def upload_to_youtube(video_path, thumbnail_path, metadata):
             "snippet": {
                 "title": metadata["title"],
                 "description": description,
-                "tags": ["AIドラマ", "オリジナルアニメ", "Gemini", "YouTube自動化", "長編"],
+                "tags": [metadata.get("genre", "YouTube"), "Gemini", "YouTube自動化", "AI動画", "長編"],
                 "categoryId": "24",
             },
             "status": {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False},
@@ -526,28 +899,56 @@ def main():
     restore_credentials()
 
     theme = os.environ.get("INPUT_VIDEO_TITLE")
-    genre = os.environ.get("INPUT_VIDEO_GENRE") or "AIドラマ"
-    tone = os.environ.get("INPUT_VIDEO_TONE") or "シネマティック"
+    genre = os.environ.get("INPUT_VIDEO_GENRE") or "自動判定"
+    tone = os.environ.get("INPUT_VIDEO_TONE") or "わかりやすく、最後まで見たくなる雰囲気"
     if not theme:
         raise ValueError("❌ スプレッドシートのA2セル（テーマ）が空です。")
 
-    log(f"🎯 長編制作開始 -> テーマ: {theme} (ジャンル: {genre}, 雰囲気: {tone})")
+    log("=" * 60)
+    log(f"🎯 動画制作開始 -> テーマ: {theme}")
+    log(f"   指定ジャンル: {genre}")
+    log(f"   トーン: {tone}")
+    log("=" * 60)
 
+    # 1. テーマに合わせた台本生成
     metadata = generate_script_with_gemini(theme, genre, tone)
+
+    # 2. 実際の音声時間を測り、8〜10分に調整
+    client = gemini_client()
+    plan = classify_theme(client, theme, genre)
+    research = json.loads((WORK_DIR / "research.json").read_text(encoding="utf-8")) if (WORK_DIR / "research.json").exists() else {"items": [], "sources": []}
+
+    for calibration in range(2):
+        scene_texts = [sc["text"] for sc in metadata["scenes"]]
+        narration, timeline, total_audio = create_narration(scene_texts)
+        log(f"⏱️ ナレーション実測: {total_audio / 60:.2f}分")
+        if 8 * 60 <= total_audio <= 10 * 60:
+            break
+        if calibration == 1:
+            log("⚠️ 2回調整しても8〜10分に収まらないため、現在の最終版で続行します。")
+            break
+        metadata = adjust_script_to_duration(client, theme, plan, metadata, research, tone, total_audio)
+        (WORK_DIR / "script.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
     (WORK_DIR / "script.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # 3. 最終台本が決まってから画像生成
     generate_images_for_scenes(metadata["visual_style"], metadata["scenes"])
-    
-    # サムネイル生成
+
+    # 4. サムネイル生成
     thumbnail_path = None
     scene1_image = find_scene_image(1)
     if scene1_image:
         thumbnail_path = create_thumbnail(metadata["title"], scene1_image, find_japanese_font())
-    
+
+    # 5. 最終台本でナレーションを再生成（調整後の内容を確実に反映）
     scene_texts = [sc["text"] for sc in metadata["scenes"]]
     narration, timeline, total_audio = create_narration(scene_texts)
-    
+
+    # 6. 動画合成
     video_path = create_video(narration, timeline, total_audio, metadata["title"], metadata["scenes"])
+
+    # 7. YouTube投稿
     upload_to_youtube(video_path, thumbnail_path, metadata)
 
 
