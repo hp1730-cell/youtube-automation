@@ -38,7 +38,7 @@ except ImportError:
 
 # ---------------------------------------------------------------- 設定
 WORK_DIR = Path("work")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 SPEED = float(os.environ.get("NARRATION_SPEED", "1.25"))
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge")
 EDGE_VOICE = os.environ.get("EDGE_VOICE", "ja-JP-NanamiNeural")
@@ -177,17 +177,35 @@ def gemini_client():
 
 
 def model_candidates():
+    # 現行の利用可能モデルを優先し、古いgemini-2.5-flashは候補から除外する。
+    # 3.5 Flash-Liteは高頻度処理向け、3.1 Flash-Liteはフォールバック、
+    # 3.8 Flashは品質優先の最終候補。
     result = []
-    for name in [MODEL, "gemini-3.8-flash", "gemini-2.5-flash"]:
+    for name in [
+        MODEL,
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-3.8-flash",
+    ]:
         if name and name not in result:
             result.append(name)
     return result
 
 
+def _error_status(error):
+    text = str(error)
+    match = re.search(r"\b(4\d\d|5\d\d)\b", text)
+    return int(match.group(1)) if match else None
+
+
 def call_structured(client, prompt, schema, *, use_search=False, max_output_tokens=12000, temperature=0.65):
     last_error = None
     for model_name in model_candidates():
-        for attempt in range(2):
+        # 404は即座に次のモデルへ。429は12秒待って1回だけ再試行し、
+        # それでも駄目なら次のモデルへ。5xx等の一時障害も1回再試行する。
+        attempts = 2
+        for attempt in range(attempts):
             try:
                 tools = None
                 if use_search:
@@ -199,6 +217,7 @@ def call_structured(client, prompt, schema, *, use_search=False, max_output_toke
                     max_output_tokens=max_output_tokens,
                     tools=tools,
                 )
+                log(f"🤖 Geminiモデル: {model_name}")
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt,
@@ -211,8 +230,22 @@ def call_structured(client, prompt, schema, *, use_search=False, max_output_toke
                 return schema.model_validate_json(response.text), response
             except Exception as e:
                 last_error = e
-                log(f"⚠️ Gemini処理エラー ({model_name}, attempt {attempt + 1}): {str(e)[:180]}")
-                time.sleep(3 * (attempt + 1))
+                status = _error_status(e)
+                log(f"⚠️ Gemini処理エラー ({model_name}): {str(e)[:240]}")
+                if status == 404:
+                    log(f"↪️ {model_name} は利用できないため、次のモデルへ切り替えます。")
+                    break
+                if status == 429:
+                    if attempt == 0:
+                        log("⏳ Geminiのクォータ/レート制限の可能性があるため、12秒待って再試行します。")
+                        time.sleep(12)
+                        continue
+                    log(f"↪️ {model_name} の429が続いたため、次のモデルへ切り替えます。")
+                    break
+                if status and status >= 500 and attempt == 0:
+                    time.sleep(3)
+                    continue
+                break
     raise RuntimeError(f"Gemini処理に失敗しました: {last_error}")
 
 
