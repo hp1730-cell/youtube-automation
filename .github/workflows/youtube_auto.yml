@@ -1,0 +1,40 @@
+name: YouTube Auto Upload Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_title:
+        description: '動画のタイトル'
+        required: false
+        default: '【クラウド自動投稿】GitHub Actions'
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: リポジトリのチェックアウト
+      uses: actions/checkout@v4
+
+    - name: Pythonのセットアップ
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: FFmpegのインストール
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: 依存ライブラリのインストール
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: 自動生成およびYouTube投稿の実行
+      env:
+        TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+        CLIENT_SECRET_JSON: ${{ secrets.CLIENT_SECRET_JSON }}
+        INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
+      run: |
+        python cloud_upload.py
