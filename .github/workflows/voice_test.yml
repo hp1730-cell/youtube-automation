@@ -1,0 +1,56 @@
+name: Voice Test
+
+# Gemini・YouTubeは一切使わず、ナレーションの声だけを試すワークフロー。
+# 実行後、Actionsの成果物(Artifacts)から mp3 をダウンロードして聞き比べます。
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: '読み上げるテキスト'
+        required: false
+        default: '静寂に包まれた世界。今回は、誰も見たことのない物語をお届けします。'
+      speed:
+        description: '速度(1.0〜2.0)'
+        required: false
+        default: '1.5'
+
+jobs:
+  voice-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Pythonのセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ツールのインストール
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install edge-tts gTTS
+
+      - name: 声を生成して速度を変える
+        env:
+          TEXT: ${{ github.event.inputs.text }}
+          SPEED: ${{ github.event.inputs.speed }}
+        run: |
+          mkdir out
+          edge-tts --voice ja-JP-NanamiNeural --text "$TEXT" --write-media out/nanami_raw.mp3
+          edge-tts --voice ja-JP-KeitaNeural  --text "$TEXT" --write-media out/keita_raw.mp3
+          python -c "import os; from gtts import gTTS; gTTS(os.environ['TEXT'], lang='ja').save('out/gtts_raw.mp3')"
+          for name in nanami keita gtts; do
+            ffmpeg -y -i "out/${name}_raw.mp3" -af "atempo=${SPEED}" "out/${name}_x${SPEED}.mp3"
+          done
+          ls -la out
+
+      - name: mp3を保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-samples
+          path: out/
+          if-no-files-found: ignore
+          retention-days: 3
