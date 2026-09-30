@@ -30,26 +30,25 @@ def generate_script_with_gemini(theme, genre, tone):
 
     client = genai.Client(api_key=api_key)
     
-    prompt = f"""
-あなたはプロのAIアニメ・ドラマ脚本家です。
-以下の条件をもとに、YouTubeのAIドラマ・解説動画用のデータを完全にオリジナルの世界観で作成してください。
-※実在の人物、既存のアニメや映画のキャラクター、商標権・著作権に触れる固有名詞は一切使用しないでください。すべて完全オリジナルの設定にすること。
-
-- メインテーマ: {theme}
-- ジャンル: {genre}
-- 雰囲気・トーン: {tone}
-
-出力フォーマットは必ず以下のJSON形式のみで返答してください。余計な解説文やマークダウンの前後への文字追加は一切禁止です。
-{{
-  "title": "目を引く30文字以内のYouTube動画タイトル",
-  "description": "動画の概要欄テキスト（ハッシュタグ3つ含む。AIドラマ、オリジナルアニメ等）",
-  "scenes": [
-    {{"text": "第1シーンのナレーション原稿（引き込む導入部分）"}},
-    {{"text": "第2シーンのナレーション原稿（物語の核心や展開）"}},
-    {{"text": "第3シーンのナレーション原稿（感動的、または意味深な結末）"}}
-  ]
-}
-"""
+    # f-stringではなく通常の文字列結合を使用し、構文エラーを完全に防止
+    prompt = (
+        "あなたはプロのAIアニメ・ドラマ脚本家です。\n"
+        "以下の条件をもとに、YouTubeのAIドラマ・解説動画用のデータを完全にオリジナルの世界観で作成してください。\n"
+        "※実在の人物、既存のアニメや映画のキャラクター、商標権・著作権に触れる固有名詞は一切使用しないでください。すべて完全オリジナルの設定にすること。\n\n"
+        f"- メインテーマ: {theme}\n"
+        f"- ジャンル: {genre}\n"
+        f"- 雰囲気・トーン: {tone}\n\n"
+        "出力フォーマットは必ず以下のJSON形式のみで返答してください。余計な解説文やマークダウンの前後への文字追加は一切禁止です。\n"
+        "{\n"
+        '  "title": "目を引く30文字以内のYouTube動画タイトル",\n'
+        '  "description": "動画の概要欄テキスト（ハッシュタグ3つ含む。AIドラマ、オリジナルアニメ等）",\n'
+        '  "scenes": [\n'
+        '    {"text": "第1シーンのナレーション原稿（引き込む導入部分）"},\n'
+        '    {"text": "第2シーンのナレーション原稿（物語の核心や展開）"},\n'
+        '    {"text": "第3シーンのナレーション原稿（感動的、または意味深な結末）"}\n'
+        "  ]\n"
+        "}"
+    )
 
     max_retries = 3
     for attempt in range(max_retries):
@@ -115,16 +114,9 @@ def create_ai_drama_video(audio_path, metadata):
     font_path = find_japanese_font()
     title = metadata["title"]
     
-    # 複数シーンのテキストを画面に順次表示させるフィルター構築
-    # フォントが見つからない場合の対策としてフォント指定を切り替え
     font_opt = f"fontfile={font_path}:" if font_path else ""
     
-    # シネマティックなダークパープル背景に、タイトルとシーンテキストを美しく焼き込むFFmpegフィルター
-    filter_complex = (
-        "color=c=0x11071f:s=1280x720:r=30[bg];"
-        f"[bg]drawtext={font_opt}text='{title}':fontcolor=white:fontsize=46:x=(w-text_w)/2:y=100:enable='between(t,0,999)'[v]"
-    )
-
+    # FFmpegコマンドで複数シーンの字幕を焼き込む
     cmd = [
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", "color=c=0x11071f:s=1280x720:r=30",
@@ -135,7 +127,7 @@ def create_ai_drama_video(audio_path, metadata):
         f"drawtext={font_opt}text='{metadata['scenes'][1]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=430:enable='between(t,10,22)'," \
         f"drawtext={font_opt}text='{metadata['scenes'][2]['text'][:30]}...':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=510:enable='between(t,22,45)'",
         "-c:v", "libx264", "-c:a", "aac",
-        "-af", "apad=pad_dur=2.0",  # 終わりの余白を十分に持たせる
+        "-af", "apad=pad_dur=2.0",
         "-shortest",
         "-pix_fmt", "yuv420p",
         output_path
