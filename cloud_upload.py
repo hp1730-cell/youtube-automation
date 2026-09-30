@@ -28,7 +28,7 @@ except ImportError:
 # ---------------------------------------------------------------- 設定
 WORK_DIR = Path("work")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-SPEED = float(os.environ.get("NARRATION_SPEED", "1.5"))  # ナレーション速度
+SPEED = float(os.environ.get("NARRATION_SPEED", "1.2"))  # ナレーション速度
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge")  # edge / gtts
 EDGE_VOICE = os.environ.get("EDGE_VOICE", "ja-JP-NanamiNeural")  # 男性声: ja-JP-KeitaNeural
 PRIVACY = os.environ.get("PRIVACY_STATUS", "unlisted")  # private / unlisted / public
