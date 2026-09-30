@@ -1,11 +1,12 @@
 import os
 import json
+import time
 import subprocess
 from google import genai
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
-from gtts import gTTS  # 音声合成用
+from gtts import gTTS
 
 def restore_credentials():
     """GitHub SecretsからYouTube認証情報を復元"""
@@ -22,7 +23,7 @@ def restore_credentials():
         f.write(client_secret_json)
 
 def generate_script_with_gemini(theme, genre, tone):
-    """Gemini APIを使用して、AIドラマ風の台本・タイトル・ナレーションを自動生成"""
+    """Gemini APIを使用してAIドラマ風の台本を生成（503エラー対策のリトライ機能付き）"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("❌ GEMINI_API_KEY が設定されていません。")
@@ -45,26 +46,31 @@ def generate_script_with_gemini(theme, genre, tone):
 }}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt
-    )
-    
-    try:
-        clean_text = response.text.strip().replace("```json", "").replace("```", "")
-        data = json.loads(clean_text)
-        print("🤖 GeminiによるAIドラマ台本の生成が完了しました：")
-        print(f"  タイトル: {data.get('title')}")
-        print(f"  概要欄: {data.get('description')}")
-        print(f"  原稿: {data.get('script')}")
-        return data
-    except Exception as e:
-        print(f"⚠️️ JSONパースエラー: {e}")
-        return {
-            "title": f"【{genre}ドラマ】{theme}",
-            "description": f"{theme}を描くオリジナルAIドラマ。#{genre} #AIドラマ #自動生成",
-            "script": f"静寂の中、物語が動き出す。今回は{theme}をテーマにした特別なストーリーをお届けします。"
-        }
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f"🤖 Gemini APIに接続中... (試行回数: {attempt + 1}/{max_retries})")
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=prompt
+            )
+            clean_text = response.text.strip().replace("```json", "").replace("```", "")
+            data = json.loads(clean_text)
+            print("✨ 台本生成に成功しました！")
+            return data
+        except Exception as e:
+            print(f"⚠️ 接続エラーが発生しました: {e}")
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 5  # 5秒、10秒と待機時間を延ばす
+                print(f"⏳ {wait_time}秒後に自動リトライします...")
+                time.sleep(wait_time)
+            else:
+                print("❌ サーバー混雑が解消されないため、フォールバック用の台本を使用します。")
+                return {
+                    "title": f"【{genre}ドラマ】{theme}",
+                    "description": f"{theme}を描くオリジナルAIドラマ。#{genre} #AIドラマ #自動生成",
+                    "script": f"静寂の中、物語が動き出す。今回は{theme}をテーマにした特別なストーリーをお届けします。"
+                }
 
 def create_voice_audio(script_text):
     """台本からナレーション音声（mp3）を自動生成"""
@@ -74,23 +80,17 @@ def create_voice_audio(script_text):
     tts.save(audio_path)
     return audio_path
 
-def create_ai_drama_video(audio_path, script_text):
+def create_ai_drama_video(audio_path):
     """FFmpegを使用して、背景画像・音声・字幕を合成した本格動画を作成"""
-    print("🎬 動画と字幕の合成処理を開始します...")
-    
+    print("🎬 動画と音声の合成処理を開始します...")
     video_path = "ai_drama_output.mp4"
     
-    # 1. まず音声の長さを取得する（FFprobeなどを使うのが確実ですが、簡易的に静止画動画を作成）
-    # ここでは、ドラマ風のダークな背景（黒または深青）に、ナレーション字幕を乗せた動画を作ります
-    
-    # FFmpegコマンド：背景色（黒）、音声ファイル合成、字幕テキスト焼き付け
-    # ※Linux環境（GitHub Actions）で日本語フォントが使えるようシンプルに構成します
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", "color=c=0x111122:s=1280x720:r=30", # ダークブルーの背景
-        "-i", audio_path,                                      # 生成した音声
+        "-f", "lavfi", "-i", "color=c=0x111122:s=1280x720:r=30",
+        "-i", audio_path,
         "-c:v", "libx264", "-c:a", "aac",
-        "-shortest",                                           # 音声の長さに合わせる
+        "-shortest",
         "-pix_fmt", "yuv420p",
         video_path
     ]
@@ -109,10 +109,10 @@ def upload_to_youtube(video_path, metadata):
             "title": metadata["title"],
             "description": metadata["description"],
             "tags": ["AIドラマ", "Gemini", "YouTube自動化"],
-            "categoryId": "24"  # 映画とアニメカテゴリ
+            "categoryId": "24"
         },
         "status": {
-            "privacyStatus": "unlisted"  # 限定公開
+            "privacyStatus": "unlisted"
         }
     }
 
@@ -147,16 +147,9 @@ def main():
         
     print(f"🎯 AIドラマ制作開始 -> テーマ: {input_theme} (ジャンル: {input_genre}, 雰囲気: {input_tone})")
     
-    # 1. Geminiでドラマ風台本生成
     metadata = generate_script_with_gemini(input_theme, input_genre, input_tone)
-    
-    # 2. 音声（ナレーション）の生成
     audio_path = create_voice_audio(metadata["script"])
-    
-    # 3. 本格動画（音声＋背景）の合成
-    video_path = create_ai_drama_video(audio_path, metadata["script"])
-    
-    # 4. YouTube投稿
+    video_path = create_ai_drama_video(audio_path)
     upload_to_youtube(video_path, metadata)
 
 if __name__ == "__main__":
