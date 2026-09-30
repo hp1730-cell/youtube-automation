@@ -35,6 +35,7 @@ jobs:
       env:
         TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
         CLIENT_SECRET_JSON: ${{ secrets.CLIENT_SECRET_JSON }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
       run: |
         python cloud_upload.py
