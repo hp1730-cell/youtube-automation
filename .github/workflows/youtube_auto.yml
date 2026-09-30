@@ -7,13 +7,13 @@ on:
         description: '動画のテーマ'
         required: true
       video_genre:
-        description: '動画のジャンル'
+        description: '動画のジャンル（自動判定も可）'
         required: false
-        default: 'AIドラマ'
+        default: '自動判定'
       video_tone:
         description: 'ナレーションの雰囲気'
         required: false
-        default: 'シネマティック'
+        default: 'わかりやすく、最後まで見たくなる雰囲気'
       dry_run:
         description: 'trueなら動画を作るだけで投稿しない(動作確認用)'
         required: false
@@ -26,7 +26,7 @@ concurrency:
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 20   # どこかで固まっても黄色のまま放置されないようにする
+    timeout-minutes: 45
 
     steps:
       - name: リポジトリのチェックアウト
@@ -55,16 +55,20 @@ jobs:
           INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
           INPUT_VIDEO_GENRE: ${{ github.event.inputs.video_genre }}
           INPUT_VIDEO_TONE: ${{ github.event.inputs.video_tone }}
+          NARRATION_SPEED: '1.25'
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: python cloud_upload.py
 
-      - name: 生成した動画を保存(確認用)
+      - name: 生成した成果物を保存(確認用)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-drama-video
+          name: youtube-auto-output
           path: |
             work/ai_drama_output.mp4
             work/script.json
+            work/research.json
+            work/outline.json
+            work/thumbnail.jpg
           if-no-files-found: ignore
           retention-days: 3
