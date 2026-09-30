@@ -35,7 +35,11 @@ PRIVACY = os.environ.get("PRIVACY_STATUS", "unlisted")  # private / unlisted / p
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 
 WIDTH, HEIGHT, FPS = 1280, 720, 30
-BG_COLOR = "0x2b1055"  # 深い紫。vignetteで周辺が暗くなりグラデーション風になる
+IMAGE_DIR = Path(os.environ.get("IMAGE_DIR", "images"))  # images/scene_1.png のように置くと、そのシーンの背景に使う
+BG_PALETTE = ["0x2b1055", "0x0f2a55", "0x4a1040", "0x0d3b3b"]  # 画像が無いシーンの背景色(紫/青/えんじ/深緑)
+SCENE_FADE = 0.4  # シーンの切り替え(暗転)の長さ(秒)
+ZOOM_AMOUNT = 0.15  # 画像のゆっくりズームの量(15%)
+TITLE_SHOW = (0.5, 4.5)  # タイトルを表示する時間(秒)
 LEAD_IN = 0.8  # 冒頭の無音(秒)
 TAIL = 2.0  # 終わりの余白(秒)。ぷつっと切れるのを防ぐ
 CLIP_GAP = 0.25  # 文と文の間の無音(秒)
@@ -74,11 +78,13 @@ def restore_credentials():
 # ---------------------------------------------------------------- 台本生成
 class Scene(BaseModel):
     text: str
+    image_prompt: str
 
 
 class Drama(BaseModel):
     title: str
     description: str
+    visual_style: str
     scenes: list[Scene]
 
 
@@ -93,8 +99,13 @@ def build_prompt(theme, genre, tone):
         "条件:\n"
         "- title: 目を引く30文字以内のタイトル\n"
         "- description: 動画の概要(ハッシュタグ3つを含む)\n"
+        "- visual_style: 全シーン共通の画風と登場人物の外見の固定設定(英語)。\n"
+        "  例: Japanese anime style, soft cel shading, a girl with short silver hair and a red scarf。\n"
+        "  どのシーンでも同じ人物・同じ画風で描けるよう、髪型・服・色まで具体的に書く。\n"
         "- scenes: 3〜4シーン。起承転結があり、各シーンは3〜4文。1文は40文字以内。\n"
-        "  ナレーションとして読み上げるので、記号や括弧、ト書きは使わず、話し言葉の文章だけを書く。\n"
+        "  text: ナレーションとして読み上げるので、記号や括弧、ト書きは使わず、話し言葉の文章だけを書く。\n"
+        "  image_prompt: そのシーンを描くイラストの英語プロンプト(構図・背景・光・人物の動き)。\n"
+        "  画像内に文字は入れない。実在の人物や既存作品のキャラクターは使わない。\n"
     )
 
 
@@ -118,13 +129,17 @@ def generate_script_with_gemini(theme, genre, tone):
                 ),
             )
             data = json.loads(response.text)
-            scenes = [s["text"].strip() for s in data["scenes"] if s.get("text", "").strip()]
+            scenes = [
+                {"text": sc["text"].strip(), "image_prompt": (sc.get("image_prompt") or "").strip()}
+                for sc in data["scenes"] if sc.get("text", "").strip()
+            ]
             if not scenes or not data.get("title"):
                 raise ValueError("台本の形式が不正です")
             log("✨ 台本生成に成功しました")
             return {
                 "title": data["title"].strip()[:100],
                 "description": data.get("description", "").strip(),
+                "visual_style": (data.get("visual_style") or "").strip(),
                 "scenes": scenes,
             }
         except Exception as e:
@@ -142,25 +157,25 @@ def generate_script_with_gemini(theme, genre, tone):
 
 
 # ---------------------------------------------------------------- ナレーション
-def split_into_clips(scenes):
-    """シーンを文に分け、長い文は読点で分割して、読み上げ単位のリストにする。"""
+def split_into_clips(scene_texts):
+    """シーンを文に分け、長い文は読点で分割して、(シーン番号, 文) のリストにする。"""
     clips = []
-    for scene in scenes:
+    for scene_index, scene in enumerate(scene_texts):
         for sentence in re.split(r"(?<=[。！？!?])\s*", scene.strip()):
             sentence = sentence.strip()
             if not sentence:
                 continue
             if len(sentence) <= MAX_CHARS_PER_CLIP:
-                clips.append(sentence)
+                clips.append((scene_index, sentence))
                 continue
             buf = ""
             for part in re.split(r"(?<=、)", sentence):
                 if buf and len(buf) + len(part) > MAX_CHARS_PER_CLIP:
-                    clips.append(buf)
+                    clips.append((scene_index, buf))
                     buf = ""
                 buf += part
             if buf:
-                clips.append(buf)
+                clips.append((scene_index, buf))
     return clips
 
 
@@ -190,11 +205,11 @@ def probe_duration(path):
     return float(result.stdout.strip())
 
 
-def _create_narration(scenes, engine):
+def _create_narration(scene_texts, engine):
     """文ごとに音声を作り、SPEED倍速にして結合する。
     各文の実際の長さから、テロップの表示タイミングも返す。"""
     log(f"🎙 ナレーション生成中... (エンジン {engine}, 速度 {SPEED}倍)")
-    texts = split_into_clips(scenes)
+    items = split_into_clips(scene_texts)
 
     lead = WORK_DIR / "lead.wav"
     run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
@@ -203,7 +218,7 @@ def _create_narration(scenes, engine):
     wavs = [lead]
     timeline = []
     cursor = LEAD_IN
-    for i, text in enumerate(texts):
+    for i, (scene_index, text) in enumerate(items):
         mp3 = WORK_DIR / f"clip_{i:03d}.mp3"
         wav = WORK_DIR / f"clip_{i:03d}.wav"
         synthesize(text, mp3, engine)
@@ -211,7 +226,7 @@ def _create_narration(scenes, engine):
              "-af", f"atempo={SPEED},apad=pad_dur={CLIP_GAP}",
              "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(wav)], timeout=120)
         duration = probe_duration(wav)
-        timeline.append({"text": text, "start": cursor, "end": cursor + duration})
+        timeline.append({"text": text, "scene": scene_index, "start": cursor, "end": cursor + duration})
         cursor += duration
         wavs.append(wav)
 
@@ -222,16 +237,16 @@ def _create_narration(scenes, engine):
     narration = WORK_DIR / "narration.wav"
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
          "-c", "copy", str(narration)], timeout=300)
-    log(f"✅ ナレーション完成: {cursor:.1f}秒 ({len(texts)}文)")
+    log(f"✅ ナレーション完成: {cursor:.1f}秒 ({len(items)}文)")
     return narration, timeline, cursor
 
 
-def create_narration(scenes):
+def create_narration(scene_texts):
     """指定エンジンで作り、失敗したらgTTSで全体を作り直す(声が途中で変わらないように)。"""
     engines = [TTS_ENGINE] + (["gtts"] if TTS_ENGINE != "gtts" else [])
     for i, engine in enumerate(engines):
         try:
-            return _create_narration(scenes, engine)
+            return _create_narration(scene_texts, engine)
         except Exception as e:
             log(f"⚠️ {engine} でのナレーション生成に失敗: {e}")
             if i == len(engines) - 1:
@@ -269,30 +284,100 @@ def write_text_file(name, text):
     return path.as_posix()
 
 
-def create_video(narration, timeline, total_audio, title):
+def find_scene_image(number):
+    """images/scene_1.png のような画像があれば返す(番号は1から)。"""
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        path = IMAGE_DIR / f"scene_{number}.{ext}"
+        if path.exists():
+            return path
+    return None
+
+
+def scene_frame_bounds(timeline, n_scenes, total):
+    """各シーンの開始フレーム番号のリスト(最後に終了フレームを付ける)。
+    フレーム単位で区切るので、シーンをつないでもズレがたまらない。"""
+    starts = {}
+    for clip in timeline:
+        starts.setdefault(clip["scene"], clip["start"])
+    starts[0] = 0.0  # 最初のシーンは冒頭の無音から
+    bounds, last = [], 0.0
+    for i in range(n_scenes):
+        last = starts.get(i, last)
+        bounds.append(round(last * FPS))
+    bounds.append(round(total * FPS))
+    return bounds
+
+
+def make_scene_segment(index, image, frames):
+    """1シーンぶんの映像(音声なし)を作る。画像があればゆっくり動かし、無ければ色が変わる背景にする。"""
+    out = WORK_DIR / f"seg_{index:02d}.mp4"
+    duration = frames / FPS
+    fade = (f"fade=t=in:st=0:d={SCENE_FADE},"
+            f"fade=t=out:st={max(duration - SCENE_FADE, 0):.3f}:d={SCENE_FADE}")
+    center = "x=iw/2-(iw/zoom/2):y=ih/2-(ih/zoom/2)"
+    if image is not None:
+        mode = index % 3  # 0:ズームイン 1:ズームアウト 2:ゆっくり横パン
+        if mode == 0:
+            move = f"z='1+{ZOOM_AMOUNT}*on/{frames}':{center}"
+        elif mode == 1:
+            move = f"z='{1 + ZOOM_AMOUNT}-{ZOOM_AMOUNT}*on/{frames}':{center}"
+        else:
+            move = f"z='{1 + ZOOM_AMOUNT}':x='(iw-iw/zoom)*on/{frames}':y=ih/2-(ih/zoom/2)"
+        vf = (f"scale={WIDTH * 2}:{HEIGHT * 2}:force_original_aspect_ratio=increase,"
+              f"crop={WIDTH * 2}:{HEIGHT * 2},"
+              f"zoompan={move}:d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},{fade}")
+        source = ["-i", str(image)]
+    else:
+        color = BG_PALETTE[index % len(BG_PALETTE)]
+        vf = f"hue=h='12*t',vignette=PI/4,{fade}"
+        source = ["-f", "lavfi", "-i", f"color=c={color}:s={WIDTH}x{HEIGHT}:r={FPS}"]
+    run(["ffmpeg", "-y", *source, "-vf", vf, "-frames:v", str(frames),
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p",
+         "-r", str(FPS), str(out)], timeout=600)
+    return out
+
+
+def create_video(narration, timeline, total_audio, title, scenes):
     log("🎬 動画合成を開始します...")
     font = find_japanese_font()
     output_path = WORK_DIR / "ai_drama_output.mp4"
     total = total_audio + TAIL
 
+    # 1) シーンごとの映像を作る
+    bounds = scene_frame_bounds(timeline, len(scenes), total)
+    segments = []
+    for i in range(len(scenes)):
+        frames = bounds[i + 1] - bounds[i]
+        if frames <= 0:
+            continue
+        image = find_scene_image(i + 1)
+        log(f"🖼 シーン{i + 1}: {image.name if image else '背景アニメーション(画像なし)'} ({frames / FPS:.1f}秒)")
+        segments.append(make_scene_segment(i, image, frames))
+
+    list_file = WORK_DIR / "segments.txt"
+    list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in segments), encoding="utf-8")
+
+    # 2) つなげて、字幕と音声を重ねる
     title_file = write_text_file("title.txt", wrap_text(title, 20))
+    speech_start, speech_end = timeline[0]["start"], timeline[-1]["end"]
     filters = [
-        "vignette=PI/4",
-        f"drawbox=x=0:y=ih-240:w=iw:h=240:color=black@0.45:t=fill",
+        f"drawbox=x=0:y=ih-230:w=iw:h=230:color=black@0.4:t=fill:"
+        f"enable='between(t,{speech_start:.2f},{speech_end:.2f})'",
         f"drawtext=fontfile={font}:textfile={title_file}:expansion=none:fontcolor=0x00ffff:"
-        f"fontsize=42:line_spacing=10:x=(w-text_w)/2:y=60",
+        f"fontsize=42:line_spacing=10:borderw=3:bordercolor=black:x=(w-text_w)/2:y=60:"
+        f"enable='between(t,{TITLE_SHOW[0]},{TITLE_SHOW[1]})'",
     ]
     for i, clip in enumerate(timeline):
         sub_file = write_text_file(f"sub_{i:03d}.txt", wrap_text(clip["text"]))
         filters.append(
             f"drawtext=fontfile={font}:textfile={sub_file}:expansion=none:fontcolor=white:"
-            f"fontsize=40:line_spacing=12:x=(w-text_w)/2:y=h-215:"
+            f"fontsize=40:line_spacing=12:borderw=2:bordercolor=black:x=(w-text_w)/2:y=h-205:"
             f"enable='between(t,{clip['start']:.2f},{clip['end']:.2f})'"
         )
 
     run([
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c={BG_COLOR}:s={WIDTH}x{HEIGHT}:r={FPS}",
+        "-f", "concat", "-safe", "0", "-i", str(list_file),
         "-i", str(narration),
         "-vf", ",".join(filters),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
@@ -371,8 +456,11 @@ def main():
     log(f"🎯 制作開始 -> テーマ: {theme} (ジャンル: {genre}, 雰囲気: {tone})")
 
     metadata = generate_script_with_gemini(theme, genre, tone)
-    narration, timeline, total_audio = create_narration(metadata["scenes"])
-    video_path = create_video(narration, timeline, total_audio, metadata["title"])
+    (WORK_DIR / "script.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")  # 画像生成用プロンプトを含む
+    scene_texts = [sc["text"] for sc in metadata["scenes"]]
+    narration, timeline, total_audio = create_narration(scene_texts)
+    video_path = create_video(narration, timeline, total_audio, metadata["title"], metadata["scenes"])
     upload_to_youtube(video_path, metadata)
 
 
