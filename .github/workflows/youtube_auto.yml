@@ -9,15 +9,25 @@ on:
       video_genre:
         description: '動画のジャンル'
         required: false
-        default: '雑学'
+        default: 'AIドラマ'
       video_tone:
         description: 'ナレーションの雰囲気'
         required: false
-        default: '標準'
+        default: 'シネマティック'
+      dry_run:
+        description: 'trueなら動画を作るだけで投稿しない(動作確認用)'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: youtube-auto
+  cancel-in-progress: false
 
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 20   # どこかで固まっても黄色のまま放置されないようにする
+
     steps:
       - name: リポジトリのチェックアウト
         uses: actions/checkout@v4
@@ -26,6 +36,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: FFmpegと日本語フォントのインストール
         run: |
@@ -37,13 +48,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 自動生成およびYouTube投稿の実行
+      - name: 動画の生成とYouTube投稿
         env:
           TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
-          CLIENT_SECRET_JSON: ${{ secrets.CLIENT_SECRET_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
           INPUT_VIDEO_GENRE: ${{ github.event.inputs.video_genre }}
           INPUT_VIDEO_TONE: ${{ github.event.inputs.video_tone }}
-        run: |
-          python cloud_upload.py
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python cloud_upload.py
+
+      - name: 生成した動画を保存(確認用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-drama-video
+          path: work/ai_drama_output.mp4
+          if-no-files-found: ignore
+          retention-days: 3
