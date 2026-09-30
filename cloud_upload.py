@@ -3,6 +3,7 @@
 流れ: Geminiで台本 → gTTSで文ごとにナレーション → FFmpegで1.5倍速化 →
       音声の実際の長さに合わせてテロップを焼き込み → YouTubeにアップロード
 """
+import asyncio
 import json
 import os
 import re
@@ -19,10 +20,17 @@ from googleapiclient.http import MediaFileUpload
 from gtts import gTTS
 from pydantic import BaseModel
 
+try:
+    import edge_tts  # 自然な日本語音声(Microsoft Edgeの読み上げ)。無ければgTTSを使う
+except ImportError:
+    edge_tts = None
+
 # ---------------------------------------------------------------- 設定
 WORK_DIR = Path("work")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 SPEED = float(os.environ.get("NARRATION_SPEED", "1.5"))  # ナレーション速度
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge")  # edge / gtts
+EDGE_VOICE = os.environ.get("EDGE_VOICE", "ja-JP-NanamiNeural")  # 男性声: ja-JP-KeitaNeural
 PRIVACY = os.environ.get("PRIVACY_STATUS", "unlisted")  # private / unlisted / public
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 ALLOW_FALLBACK = os.environ.get("ALLOW_FALLBACK", "false").strip().lower() == "true"  # 台本生成失敗時に定型台本で続行するか
@@ -172,13 +180,19 @@ def split_into_clips(scenes):
     return clips
 
 
-def synthesize(text, mp3_path):
+def synthesize(text, mp3_path, engine):
+    """1文ぶんの音声をmp3で保存する。"""
     for attempt in range(3):
         try:
-            gTTS(text=text, lang="ja", slow=False).save(str(mp3_path))
+            if engine == "edge":
+                if edge_tts is None:
+                    raise RuntimeError("edge-tts がインストールされていません")
+                asyncio.run(edge_tts.Communicate(text, EDGE_VOICE).save(str(mp3_path)))
+            else:
+                gTTS(text=text, lang="ja", slow=False).save(str(mp3_path))
             return
         except Exception as e:
-            log(f"⚠️ 音声生成エラー: {e}")
+            log(f"⚠️ 音声生成エラー({engine}): {e}")
             if attempt == 2:
                 raise
             time.sleep(2 * (attempt + 1))
@@ -192,10 +206,10 @@ def probe_duration(path):
     return float(result.stdout.strip())
 
 
-def create_narration(scenes):
+def _create_narration(scenes, engine):
     """文ごとに音声を作り、SPEED倍速にして結合する。
     各文の実際の長さから、テロップの表示タイミングも返す。"""
-    log(f"🎙 ナレーション生成中... (速度 {SPEED}倍)")
+    log(f"🎙 ナレーション生成中... (エンジン {engine}, 速度 {SPEED}倍)")
     texts = split_into_clips(scenes)
 
     lead = WORK_DIR / "lead.wav"
@@ -208,7 +222,7 @@ def create_narration(scenes):
     for i, text in enumerate(texts):
         mp3 = WORK_DIR / f"clip_{i:03d}.mp3"
         wav = WORK_DIR / f"clip_{i:03d}.wav"
-        synthesize(text, mp3)
+        synthesize(text, mp3, engine)
         run(["ffmpeg", "-y", "-i", str(mp3),
              "-af", f"atempo={SPEED},apad=pad_dur={CLIP_GAP}",
              "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(wav)], timeout=120)
@@ -226,6 +240,19 @@ def create_narration(scenes):
          "-c", "copy", str(narration)], timeout=300)
     log(f"✅ ナレーション完成: {cursor:.1f}秒 ({len(texts)}文)")
     return narration, timeline, cursor
+
+
+def create_narration(scenes):
+    """指定エンジンで作り、失敗したらgTTSで全体を作り直す(声が途中で変わらないように)。"""
+    engines = [TTS_ENGINE] + (["gtts"] if TTS_ENGINE != "gtts" else [])
+    for i, engine in enumerate(engines):
+        try:
+            return _create_narration(scenes, engine)
+        except Exception as e:
+            log(f"⚠️ {engine} でのナレーション生成に失敗: {e}")
+            if i == len(engines) - 1:
+                raise
+            log("↩️ gTTSで最初から作り直します。")
 
 
 # ---------------------------------------------------------------- 動画合成
