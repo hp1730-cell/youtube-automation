@@ -63,6 +63,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ai-drama-video
-          path: work/ai_drama_output.mp4
+          path: |
+            work/ai_drama_output.mp4
+            work/script.json
           if-no-files-found: ignore
           retention-days: 3
