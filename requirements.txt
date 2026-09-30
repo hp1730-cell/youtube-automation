@@ -2,4 +2,5 @@ google-genai
 google-api-python-client
 google-auth
 gTTS
+edge-tts
 pydantic
