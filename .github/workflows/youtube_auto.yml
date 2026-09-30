@@ -27,10 +27,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: FFmpegのインストール
+      - name: FFmpegと日本語フォントのインストール
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-noto-cjk
 
       - name: 依存関係のインストール
         run: |
