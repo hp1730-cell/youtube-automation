@@ -1,6 +1,8 @@
-google-genai
-google-api-python-client
+requests
+Pillow
+gspread
 google-auth
-gTTS
+google-api-python-client
+ddgs
+trafilatura
 edge-tts
-pydantic
