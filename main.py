@@ -725,7 +725,7 @@ def research_theme(
 
     sources = []
 
-    for result in search_results[:10\]:
+    for result in search_results[:10]:
         url = str(
             result.get(
                 "href",
