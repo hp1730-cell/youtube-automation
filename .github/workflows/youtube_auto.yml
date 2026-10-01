@@ -65,7 +65,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           VIDEO_TITLE: ${{ inputs.video_title }}
         run: |
           if [ -z "$GEMINI_API_KEY" ]; then
@@ -78,8 +78,8 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$PEXELS_API_KEY" ]; then
-            echo "::error::PEXELS_API_KEYが未登録です"
+          if [ -z "$PIXABAY_API_KEY" ]; then
+            echo "::error::PIXABAY_API_KEYが未登録です"
             exit 1
           fi
 
@@ -94,6 +94,7 @@ jobs:
         run: |
           if [ ! -f "main.py" ]; then
             echo "::error::リポジトリ直下にmain.pyがありません"
+            find . -maxdepth 3 -type f -name "*.py" -print
             exit 1
           fi
 
@@ -104,7 +105,7 @@ jobs:
         env:
           TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
 
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: "openrouter/free"
@@ -119,16 +120,30 @@ jobs:
           NARRATION_SPEED: "1.10"
 
           PRIVACY_STATUS: "private"
+
           UPLOAD_TO_YOUTUBE: "true"
           DRY_RUN: ${{ inputs.dry_run }}
 
-          PEXELS_VIDEOS_PER_SCENE: "2"
-          PEXELS_RESULTS_PER_QUERY: "15"
+          PIXABAY_VIDEOS_PER_SCENE: "2"
+          PIXABAY_RESULTS_PER_QUERY: "20"
 
           WORK_DIR: "work"
 
         run: |
           python main.py
+
+      - name: 生成結果の確認
+        if: always()
+        run: |
+          echo "========== workフォルダ =========="
+
+          if [ -d "work" ]; then
+            find work -maxdepth 1 -type f -printf "%f %s bytes\n" | sort
+          else
+            echo "workフォルダはありません"
+          fi
+
+          echo "=================================="
 
       - name: 生成した成果物を保存
         if: always()
@@ -144,8 +159,9 @@ jobs:
             work/research.json
             work/subtitles.srt
             work/raw_video.mp4
+            work/video_only.mp4
             work/narration.m4a
-            work/pexels_credits.json
+            work/pixabay_credits.json
 
           if-no-files-found: ignore
           retention-days: 7
