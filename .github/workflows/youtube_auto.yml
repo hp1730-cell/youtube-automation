@@ -3,8 +3,31 @@ name: YouTube Auto Pipeline
 on:
   workflow_dispatch:
     inputs:
+      video_title:
+        description: "動画のテーマ"
+        required: true
+        type: string
+
+      video_genre:
+        description: "動画のジャンル"
+        required: false
+        default: "自動判定"
+        type: string
+
+      video_tone:
+        description: "ナレーションの雰囲気"
+        required: false
+        default: "わかりやすく、最後まで見たくなる雰囲気"
+        type: string
+
+      spreadsheet_row:
+        description: "スプレッドシートの行番号"
+        required: false
+        default: ""
+        type: string
+
       dry_run:
-        description: "trueなら動画を生成するだけでYouTubeへ投稿しない"
+        description: "trueなら動画を作るだけで投稿しない"
         required: false
         default: "true"
         type: choice
@@ -12,16 +35,11 @@ on:
           - "true"
           - "false"
 
-  schedule:
-    # 毎日06:17 JSTに実行
-    # GitHub ActionsのcronはUTC指定
-    - cron: "17 21 * * *"
-
 permissions:
   contents: read
 
 concurrency:
-  group: youtube-auto-pipeline
+  group: youtube-auto
   cancel-in-progress: false
 
 jobs:
@@ -30,16 +48,8 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # =========================================================
-      # リポジトリ取得
-      # =========================================================
-
       - name: リポジトリのチェックアウト
         uses: actions/checkout@v4
-
-      # =========================================================
-      # Pythonセットアップ
-      # =========================================================
 
       - name: Pythonのセットアップ
         uses: actions/setup-python@v5
@@ -47,110 +57,81 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      # =========================================================
-      # FFmpeg・日本語フォント
-      # =========================================================
-
       - name: FFmpegと日本語フォントのインストール
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-cjk
-
-      # =========================================================
-      # Pythonライブラリ
-      # =========================================================
 
       - name: 依存関係のインストール
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # =========================================================
-      # 必須Secretの存在チェック
-      # 値自体はログへ表示しない
-      # =========================================================
-
       - name: 必須設定の確認
         env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          YOUTUBE_TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+          VIDEO_TITLE: ${{ inputs.video_title }}
         run: |
-          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
-            echo "::error::GOOGLE_SERVICE_ACCOUNT_JSONが未登録です"
-            exit 1
-          fi
-
-          if [ -z "$SPREADSHEET_ID" ]; then
-            echo "::error::SPREADSHEET_IDが未登録です"
-            exit 1
-          fi
-
           if [ -z "$GEMINI_API_KEY" ]; then
             echo "::error::GEMINI_API_KEYが未登録です"
             exit 1
           fi
 
-          if [ -z "$YOUTUBE_TOKEN_JSON" ]; then
+          if [ -z "$TOKEN_JSON" ]; then
             echo "::error::TOKEN_JSONが未登録です"
+            exit 1
+          fi
+
+          if [ -z "$VIDEO_TITLE" ]; then
+            echo "::error::動画テーマが空です"
             exit 1
           fi
 
           echo "必須設定を確認しました"
 
-      # =========================================================
-      # 動画生成・YouTube投稿
-      # =========================================================
-
       - name: 動画の生成とYouTube投稿
         env:
-          # Googleスプレッドシート
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          SHEET_TAB: "動画管理"
+          # 既存のGitHub Secrets
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
-          # 無料LLM
-          # OpenRouterが登録されていればOpenRouterを優先
+          # OpenRouterは登録した場合だけ使用
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: "openrouter/free"
 
-          # 既に登録済みのGemini APIキー
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # GeminiはOpenRouter失敗時の予備
           GEMINI_MODEL: "gemini-2.5-flash"
 
-          # 既に登録済みのTOKEN_JSONを使用
-          YOUTUBE_TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+          # スプレッドシートまたは手動入力から渡される情報
+          INPUT_VIDEO_TITLE: ${{ inputs.video_title }}
+          INPUT_VIDEO_GENRE: ${{ inputs.video_genre }}
+          INPUT_VIDEO_TONE: ${{ inputs.video_tone }}
+          INPUT_SPREADSHEET_ROW: ${{ inputs.spreadsheet_row }}
 
           # ナレーション
           EDGE_VOICE: "ja-JP-NanamiNeural"
           NARRATION_SPEED: "1.10"
 
-          # 初回テスト中はprivate推奨
+          # 初回は非公開
           PRIVACY_STATUS: "private"
 
-          # YouTube投稿機能
+          # 動画投稿設定
           UPLOAD_TO_YOUTUBE: "true"
+          DRY_RUN: ${{ inputs.dry_run }}
 
-          # 手動実行時の選択値
-          # 定期実行の場合はtrueとして投稿を止める設定
-          DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}
-
-          # ファイル出力先
+          # 出力先
           WORK_DIR: "work"
 
         run: |
           python main.py
-
-      # =========================================================
-      # 成果物保存
-      # =========================================================
 
       - name: 生成した成果物を保存
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: youtube-auto-output-${{ github.run_id }}
+
           path: |
             work/final.mp4
             work/thumbnail.jpg
@@ -158,5 +139,6 @@ jobs:
             work/subtitles.srt
             work/raw_video.mp4
             work/narration.m4a
+
           if-no-files-found: ignore
           retention-days: 7
