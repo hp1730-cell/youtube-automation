@@ -3,14 +3,14 @@
 import asyncio, html, json, logging, math, os, random, re, shutil, subprocess, time
 from pathlib import Path
 import edge_tts, requests, trafilatura
-from duckduckgo_search import DDGS # 修正: ddgs -> duckduckgo_search
+from duckduckgo_search import DDGS
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-VERSION = "2026.10.01-local-scene-fix-v2"
+VERSION = "2026.10.01-local-scene-fix-v3"
 WORK = Path(os.getenv("WORK_DIR", "work"))
 WORK.mkdir(parents=True, exist_ok=True)
 
@@ -319,7 +319,6 @@ def research(theme):
     ):
         log.info("Web検索: %s", query)
         try:
-            # 修正: DDGSの呼び出し方を修正
             with DDGS() as ddgs:
                 for item in ddgs.text(
                     query,
@@ -334,7 +333,7 @@ def research(theme):
             log.warning("Web検索失敗: %s", error)
 
     sources = []
-    for item in results[:10]: # 修正: 不要な \ を削除
+    for item in results[:10]:
         url = str(item.get("href", ""))
         try:
             page = trafilatura.fetch_url(url)
@@ -1161,8 +1160,8 @@ def image_clip(source, output, seconds):
         "crop=1600:900,"
         "zoompan=z='min(zoom+0.0005,1.10)':"
         "d={}:s=1280x720:fps=30,"
-        "fade=t=in:st=0:d=.22,"
-        "fade=t=out:st={:.3f}:d=.22,"
+        "fade=t=in:st=0:d=0.22," # 修正: .22 -> 0.22
+        "fade=t=out:st={:.3f}:d=0.22," # 修正: .22 -> 0.22
         "format=yuv420p"
     ).format(frames, fade)
 
@@ -1209,8 +1208,8 @@ def video_clip(source, output, seconds, index):
         "force_original_aspect_ratio=increase,"
         "crop=1280:720,"
         "fps=30,"
-        "fade=t=in:st=0:d=.18,"
-        "fade=t=out:st={:.3f}:d=.18,"
+        "fade=t=in:st=0:d=0.18," # 修正: .18 -> 0.18
+        "fade=t=out:st={:.3f}:d=0.18," # 修正: .18 -> 0.18
         "format=yuv420p"
     ).format(fade)
 
@@ -1601,7 +1600,6 @@ def main():
     ).strip()
 
     if not theme:
-        # 修正: クォーテーションを追加
         raise RuntimeError(
            "INPUT_VIDEO_TITLEが空です。"
         )
