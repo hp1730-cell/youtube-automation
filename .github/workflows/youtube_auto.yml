@@ -104,10 +104,10 @@ jobs:
           path = Path("main.py")
           text = path.read_text(encoding="utf-8")
 
-          before = text.count(r"\]")
+          replacement_count = text.count("\\]")
 
           text = text.replace(
-              r"\]",
+              "\\]",
               "]",
           )
 
@@ -118,7 +118,7 @@ jobs:
 
           print(
               f"不要なバックスラッシュを"
-              f"{before}件修正しました"
+              f"{replacement_count}件修正しました"
           )
           PY
 
@@ -135,7 +135,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: "openrouter/free"
 
-          GEMINI_MODEL: "gemini-2.5-flash"
+          GEMINI_MODEL: "gemini-3-flash"
 
           INPUT_VIDEO_TITLE: ${{ inputs.video_title }}
           INPUT_VIDEO_GENRE: ${{ inputs.video_genre }}
