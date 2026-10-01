@@ -135,7 +135,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: "openrouter/free"
 
-          GEMINI_MODEL: "gemini-3-flash-preview"
+          GEMINI_MODEL: "gemini-3.1-flash-lite"
 
           INPUT_VIDEO_TITLE: ${{ inputs.video_title }}
           INPUT_VIDEO_GENRE: ${{ inputs.video_genre }}
