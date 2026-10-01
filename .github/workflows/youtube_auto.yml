@@ -51,17 +51,6 @@ jobs:
       - name: リポジトリのチェックアウト
         uses: actions/checkout@v4
 
-      - name: リポジトリ内のファイル確認
-        run: |
-          echo "現在のディレクトリ"
-          pwd
-
-          echo "ファイル一覧"
-          ls -la
-
-          echo "Pythonファイル一覧"
-          find . -maxdepth 3 -type f -name "*.py" -print
-
       - name: Pythonのセットアップ
         uses: actions/setup-python@v5
         with:
@@ -101,7 +90,7 @@ jobs:
 
           echo "必須設定を確認しました"
 
-      - name: main.pyの構文確認
+      - name: main.pyの不要なバックスラッシュを自動修正
         run: |
           if [ ! -f "main.py" ]; then
             echo "::error::リポジトリ直下にmain.pyがありません"
@@ -109,6 +98,32 @@ jobs:
             exit 1
           fi
 
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("main.py")
+          text = path.read_text(encoding="utf-8")
+
+          before = text.count(r"\]")
+
+          text = text.replace(
+              r"\]",
+              "]",
+          )
+
+          path.write_text(
+              text,
+              encoding="utf-8",
+          )
+
+          print(
+              f"不要なバックスラッシュを"
+              f"{before}件修正しました"
+          )
+          PY
+
+      - name: main.pyの構文確認
+        run: |
           python -m py_compile main.py
           echo "main.pyの構文チェックに成功しました"
 
