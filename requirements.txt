@@ -1,7 +1,7 @@
-requests
-Pillow
-google-auth
-google-api-python-client
-ddgs
-trafilatura
+duckduckgo_search
 edge-tts
+requests
+trafilatura
+google-api-python-client
+google-auth-oauthlib
+Pillow
