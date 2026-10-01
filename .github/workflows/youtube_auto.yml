@@ -3,21 +3,22 @@ name: YouTube Auto Pipeline
 on:
   workflow_dispatch:
     inputs:
-      video_title:
-        description: '動画のテーマ'
-        required: true
-      video_genre:
-        description: '動画のジャンル（自動判定も可）'
-        required: false
-        default: '自動判定'
-      video_tone:
-        description: 'ナレーションの雰囲気'
-        required: false
-        default: 'わかりやすく、最後まで見たくなる雰囲気'
       dry_run:
-        description: 'trueなら動画を作るだけで投稿しない(動作確認用)'
+        description: "trueなら動画生成のみでYouTubeへ投稿しない"
         required: false
-        default: 'false'
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+  schedule:
+    # 毎日06:17（日本時間）に実行
+    # GitHub ActionsのcronはUTCで指定
+    - cron: "17 21 * * *"
+
+permissions:
+  contents: read
 
 concurrency:
   group: youtube-auto
@@ -26,50 +27,114 @@ concurrency:
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+
+    # Web調査、TTS、動画エンコード、アップロードを考慮
+    timeout-minutes: 90
 
     steps:
+      # ==========================================================
+      # リポジトリ取得
+      # ==========================================================
+
       - name: リポジトリのチェックアウト
         uses: actions/checkout@v4
+
+      # ==========================================================
+      # Python環境
+      # ==========================================================
 
       - name: Pythonのセットアップ
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.12"
+          cache: "pip"
+
+      # ==========================================================
+      # FFmpeg、日本語フォント
+      # ==========================================================
 
       - name: FFmpegと日本語フォントのインストール
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-cjk
 
+      # ==========================================================
+      # Pythonライブラリ
+      # ==========================================================
+
       - name: 依存関係のインストール
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ==========================================================
+      # 動画生成・YouTube投稿
+      # ==========================================================
+
       - name: 動画の生成とYouTube投稿
         env:
-          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: 'gemini-3.5-flash-lite'
-          INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
-          INPUT_VIDEO_GENRE: ${{ github.event.inputs.video_genre }}
-          INPUT_VIDEO_TONE: ${{ github.event.inputs.video_tone }}
-          NARRATION_SPEED: '1.25'
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
-        run: python cloud_upload.py
+          # ------------------------------------------------------
+          # Googleスプレッドシート
+          # ------------------------------------------------------
 
-      - name: 生成した成果物を保存(確認用)
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          SHEET_TAB: "動画管理"
+
+          # ------------------------------------------------------
+          # 無料LLM
+          # OpenRouterを優先し、Geminiは予備として使用
+          # ------------------------------------------------------
+
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: "openrouter/free"
+
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: "gemini-2.5-flash"
+
+          # ------------------------------------------------------
+          # YouTube認証
+          # ------------------------------------------------------
+
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+
+          # ------------------------------------------------------
+          # 動画・音声設定
+          # ------------------------------------------------------
+
+          EDGE_VOICE: "ja-JP-NanamiNeural"
+          NARRATION_SPEED: "1.10"
+
+          # 最初はprivateを推奨
+          # 動作確認後にunlistedへ変更可能
+          PRIVACY_STATUS: "private"
+
+          UPLOAD_TO_YOUTUBE: "true"
+
+          # 手動実行では入力値を使用
+          # 定期実行では未入力になるためfalseを利用
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+        run: |
+          python main.py
+
+      # ==========================================================
+      # 成果物保存
+      # ==========================================================
+
+      - name: 生成した成果物を保存
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-auto-output
+          name: youtube-auto-output-${{ github.run_id }}
+
           path: |
-            work/ai_drama_output.mp4
-            work/script.json
-            work/research.json
-            work/outline.json
+            work/final.mp4
             work/thumbnail.jpg
+            work/metadata.json
+            work/subtitles.srt
+            work/raw_video.mp4
+            work/narration.m4a
+
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 7
