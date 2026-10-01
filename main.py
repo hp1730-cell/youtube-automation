@@ -50,14 +50,14 @@ VOICE = os.getenv(
     "ja-JP-NanamiNeural",
 )
 
-NARRATION_SPEED = float(
+SPEED = float(
     os.getenv(
         "NARRATION_SPEED",
         "1.10",
     )
 )
 
-PRIVACY_STATUS = os.getenv(
+PRIVACY = os.getenv(
     "PRIVACY_STATUS",
     "private",
 )
@@ -65,12 +65,12 @@ PRIVACY_STATUS = os.getenv(
 DRY_RUN = (
     os.getenv(
         "DRY_RUN",
-        "false",
+        "true",
     ).strip().lower()
     == "true"
 )
 
-UPLOAD_TO_YOUTUBE = (
+UPLOAD = (
     os.getenv(
         "UPLOAD_TO_YOUTUBE",
         "true",
@@ -153,9 +153,9 @@ def get_font_path():
     日本語フォントのパスを取得する。
     """
 
-    for filename in FONT_FILES:
-        if Path(filename).exists():
-            return filename
+    for font_file in FONT_FILES:
+        if Path(font_file).exists():
+            return font_file
 
     raise RuntimeError(
         "日本語フォントがありません。"
@@ -166,7 +166,7 @@ def get_font_path():
 
 def check_runtime():
     """
-    FFmpegなどの実行環境を確認する。
+    FFmpeg、FFprobe、日本語フォントを確認する。
     """
 
     for command in (
@@ -183,39 +183,59 @@ def check_runtime():
     get_font_path()
 
 
-def get_json_secret(
-    secret_name,
+def clean_text(
+    text,
 ):
     """
-    JSON形式の環境変数を読み取る。
+    HTML、URL、余分な空白を削除する。
     """
 
-    raw_value = os.getenv(
-        secret_name,
+    text = html.unescape(
+        str(text)
+    )
+
+    text = re.sub(
+        r"https?://\S+",
         "",
-    ).strip()
+        text,
+    )
 
-    if not raw_value:
-        raise RuntimeError(
-            "{}が未設定です。".format(
-                secret_name
-            )
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    return text.strip()
+
+
+def wrap_text(
+    text,
+    width,
+):
+    """
+    指定文字数ごとに改行する。
+    """
+
+    lines = []
+    position = 0
+
+    while position < len(text):
+        lines.append(
+            text[
+                position:
+                position + width
+            ]
         )
 
-    try:
-        return json.loads(
-            raw_value
-        )
+        position += width
 
-    except json.JSONDecodeError as error:
-        raise RuntimeError(
-            "{}のJSON形式が正しくありません。".format(
-                secret_name
-            )
-        ) from error
+    return "\n".join(
+        lines
+    )
 
 
-def parse_llm_json(
+def parse_json_response(
     response_text,
 ):
     """
@@ -260,56 +280,36 @@ def parse_llm_json(
             ) from error
 
 
-def clean_text(
-    text,
+def get_json_secret(
+    secret_name,
 ):
     """
-    HTML、URL、余分な空白を削除する。
+    JSON形式の環境変数を読み取る。
     """
 
-    text = html.unescape(
-        str(text)
-    )
-
-    text = re.sub(
-        r"https?://\S+",
+    raw_value = os.getenv(
+        secret_name,
         "",
-        text,
-    )
+    ).strip()
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    )
-
-    return text.strip()
-
-
-def wrap_text(
-    text,
-    characters_per_line,
-):
-    """
-    指定文字数ごとに改行する。
-    """
-
-    lines = []
-    position = 0
-
-    while position < len(text):
-        lines.append(
-            text[
-                position:
-                position + characters_per_line
-            ]
+    if not raw_value:
+        raise RuntimeError(
+            "{}が未設定です。".format(
+                secret_name
+            )
         )
 
-        position += characters_per_line
+    try:
+        return json.loads(
+            raw_value
+        )
 
-    return "\n".join(
-        lines
-    )
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            "{}のJSON形式が正しくありません。".format(
+                secret_name
+            )
+        ) from error
 
 
 # ================================================================
@@ -350,7 +350,7 @@ class FreeLLMClient:
         max_attempts=5,
     ):
         """
-        APIを呼び出して、
+        APIを呼び出し、
         一時的なエラーの場合は再試行する。
         """
 
@@ -442,7 +442,7 @@ class FreeLLMClient:
         temperature=0.4,
     ):
         """
-        OpenRouter、Geminiの順に試す。
+        OpenRouter、Geminiの順に問い合わせる。
         """
 
         errors = []
@@ -553,13 +553,13 @@ class FreeLLMClient:
             "max_tokens": max_tokens,
         }
 
-        result = self.post_with_retry(
+        response_data = self.post_with_retry(
             url,
             headers,
             payload,
         )
 
-        choices = result.get(
+        choices = response_data.get(
             "choices",
             [],
         )
@@ -575,7 +575,7 @@ class FreeLLMClient:
             .get("content", "")
         )
 
-        return parse_llm_json(
+        return parse_json_response(
             response_text
         )
 
@@ -626,13 +626,13 @@ class FreeLLMClient:
             },
         }
 
-        result = self.post_with_retry(
+        response_data = self.post_with_retry(
             url,
             headers,
             payload,
         )
 
-        candidates = result.get(
+        candidates = response_data.get(
             "candidates",
             [],
         )
@@ -658,7 +658,7 @@ class FreeLLMClient:
             "",
         )
 
-        return parse_llm_json(
+        return parse_json_response(
             response_text
         )
 
@@ -671,7 +671,7 @@ def research_theme(
     theme,
 ):
     """
-    Web検索して本文を取得する。
+    Web検索し、検索先の本文を取得する。
     """
 
     search_queries = [
@@ -684,7 +684,7 @@ def research_theme(
         ),
     ]
 
-       search_results = []
+    search_results = []
     seen_urls = set()
 
     for query in search_queries:
@@ -798,7 +798,7 @@ def research_theme(
             {
                 "title": title,
                 "url": url,
-                "text": page_text[:6500],
+                "text": page_text[:5000],
             }
         )
 
@@ -820,6 +820,7 @@ def research_theme(
     )
 
     return sources
+
 
 
 # ================================================================
@@ -903,10 +904,10 @@ def generate_script(
 ・冒頭15秒に疑問か意外性を置く
 ・資料で確認できる事実だけを断定する
 ・同じ説明を繰り返さない
-・narrationは読み上げ本文だけ
-・image_queryはWikimedia Commons向け英語名詞句
-・titleは45文字以内
-・JSON以外は禁止
+・narrationには読み上げ本文だけを入れる
+・image_queryにはWikimedia Commons向けの英語名詞句を入れる
+・titleは45文字以内にする
+・JSON以外の文章を返さない
 
 参考資料:
 {}
@@ -1532,7 +1533,7 @@ async def synthesize_audio(
     """
 
     speed_percent = int(
-        (NARRATION_SPEED - 1)
+        (SPEED - 1)
         * 100
     )
 
@@ -1571,8 +1572,18 @@ async def synthesize_audio(
             last_error = error
 
             if attempt < 3:
-                await asyncio.sleep(
+                wait_seconds = (
                     2 ** attempt
+                )
+
+                log.warning(
+                    "音声生成を"
+                    "%d秒後に再試行します。",
+                    wait_seconds,
+                )
+
+                await asyncio.sleep(
+                    wait_seconds
                 )
 
     raise RuntimeError(
@@ -1859,7 +1870,7 @@ def create_narration(
         cursor,
         subtitle_path,
     )
-
+    
 
 # ================================================================
 # 動画生成
@@ -1874,7 +1885,7 @@ def create_video(
     subtitle_path,
 ):
     """
-    画像、音声、字幕を合成する。
+    画像、音声、字幕を合成して動画を生成する。
     """
 
     scene_start_times = {
@@ -1945,51 +1956,17 @@ def create_video(
             )
         )
 
-        frame_count = max(
-            1,
-            int(
-                segment_duration
-                * FPS
-            ),
-        )
-
-        if scene_index % 2 == 0:
-            zoom_expression = (
-                "min(zoom+0.0003,1.12)"
-            )
-        else:
-            zoom_expression = (
-                "if(eq(on,1),1.12,"
-                "max(zoom-0.0003,1.0))"
-            )
-
-        fade_out_start = max(
-            0,
-            segment_duration - 0.35,
-        )
-
-        video_filter = (
-            "scale=2560:1440:"
-            "force_original_aspect_ratio=increase,"
-            "crop=2560:1440,"
-            "zoompan="
-            "z='{}':"
-            "d={}:"
-            "s=1280x720:"
-            "fps=30,"
-            "fade=t=in:st=0:d=0.35,"
-            "fade=t=out:st={:.3f}:"
-            "d=0.35"
-        ).format(
-            zoom_expression,
-            frame_count,
-            fade_out_start,
-        )
-
         log.info(
             "動画シーン生成 %d/%d",
             scene_index + 1,
             len(image_paths),
+        )
+
+        video_filter = (
+            "scale=1280:720:"
+            "force_original_aspect_ratio=increase,"
+            "crop=1280:720,"
+            "format=yuv420p"
         )
 
         run_command(
@@ -2006,22 +1983,27 @@ def create_video(
                 "{:.3f}".format(
                     segment_duration
                 ),
+                "-r",
+                str(FPS),
                 "-c:v",
                 "libx264",
                 "-preset",
                 "veryfast",
                 "-crf",
-                "21",
+                "22",
                 "-pix_fmt",
                 "yuv420p",
-                "-r",
-                str(FPS),
                 str(segment_path),
             ]
         )
 
         segment_paths.append(
             segment_path
+        )
+
+    if not segment_paths:
+        raise RuntimeError(
+            "動画セグメントが生成されませんでした。"
         )
 
     segments_file = (
@@ -2073,6 +2055,11 @@ def create_video(
         ]
     )
 
+    if not raw_video_path.exists():
+        raise RuntimeError(
+            "字幕合成前の動画が生成されませんでした。"
+        )
+
     final_video_path = (
         WORK
         / "final.mp4"
@@ -2083,6 +2070,8 @@ def create_video(
         "FontSize=22,"
         "PrimaryColour=&H00FFFFFF,"
         "OutlineColour=&H00000000,"
+        "BackColour=&H64000000,"
+        "BorderStyle=1,"
         "Outline=2,"
         "Shadow=1,"
         "Alignment=2,"
@@ -2129,11 +2118,16 @@ def create_video(
         ]
     )
 
+    if not final_video_path.exists():
+        raise RuntimeError(
+            "最終動画が生成されませんでした。"
+        )
+
     return final_video_path
 
 
 # ================================================================
-# サムネイル
+# サムネイル生成
 # ================================================================
 
 def create_thumbnail(
@@ -2141,7 +2135,7 @@ def create_thumbnail(
     background_path,
 ):
     """
-    サムネイルを生成する。
+    YouTube用のサムネイルを生成する。
     """
 
     output_path = (
@@ -2270,12 +2264,12 @@ def create_thumbnail(
 
 
 # ================================================================
-# YouTube投稿
+# YouTube認証
 # ================================================================
 
 def get_youtube_credentials():
     """
-    TOKEN_JSONからYouTube認証情報を取得する。
+    TOKEN_JSONからYouTube認証情報を作成する。
     """
 
     token_information = (
@@ -2302,6 +2296,10 @@ def get_youtube_credentials():
     return credentials
 
 
+# ================================================================
+# YouTube投稿
+# ================================================================
+
 def upload_to_youtube(
     video_path,
     thumbnail_path,
@@ -2309,14 +2307,20 @@ def upload_to_youtube(
     image_credits,
 ):
     """
-    YouTubeへ投稿する。
+    動画とサムネイルをYouTubeへ投稿する。
     """
 
-    if (
-        DRY_RUN
-        or not UPLOAD_TO_YOUTUBE
-    ):
+    if DRY_RUN:
         log.info(
+            "DRY_RUN=trueのため、"
+            "YouTube投稿をスキップします。"
+        )
+
+        return None
+
+    if not UPLOAD:
+        log.info(
+            "UPLOAD_TO_YOUTUBE=falseのため、"
             "YouTube投稿をスキップします。"
         )
 
@@ -2414,7 +2418,7 @@ def upload_to_youtube(
         },
         "status": {
             "privacyStatus": (
-                PRIVACY_STATUS
+                PRIVACY
             ),
             "selfDeclaredMadeForKids": (
                 False
@@ -2441,6 +2445,10 @@ def upload_to_youtube(
             media_body=video_media,
             notifySubscribers=False,
         )
+    )
+
+    log.info(
+        "YouTubeへの動画投稿を開始します。"
     )
 
     upload_response = None
@@ -2471,24 +2479,29 @@ def upload_to_youtube(
             "YouTubeの動画IDを取得できませんでした。"
         )
 
-    try:
-        thumbnail_media = (
-            MediaFileUpload(
-                str(thumbnail_path),
-                mimetype="image/jpeg",
+    if thumbnail_path.exists():
+        try:
+            thumbnail_media = (
+                MediaFileUpload(
+                    str(thumbnail_path),
+                    mimetype="image/jpeg",
+                )
             )
-        )
 
-        youtube.thumbnails().set(
-            videoId=video_id,
-            media_body=thumbnail_media,
-        ).execute()
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=thumbnail_media,
+            ).execute()
 
-    except Exception as error:
-        log.warning(
-            "サムネイル設定失敗: %s",
-            error,
-        )
+            log.info(
+                "サムネイルを設定しました。"
+            )
+
+        except Exception as error:
+            log.warning(
+                "サムネイル設定失敗: %s",
+                error,
+            )
 
     return video_id
 
@@ -2609,6 +2622,11 @@ def main():
         )
     )
 
+    if not image_paths:
+        raise RuntimeError(
+            "シーン画像が生成されませんでした。"
+        )
+
     (
         narration_path,
         timeline,
@@ -2728,3 +2746,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
