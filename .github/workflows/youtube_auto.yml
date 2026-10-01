@@ -27,7 +27,7 @@ on:
         type: string
 
       dry_run:
-        description: "trueなら動画を作るだけで投稿しない"
+        description: "trueなら動画を作るだけでYouTubeへ投稿しない"
         required: false
         default: "true"
         type: choice
@@ -50,6 +50,17 @@ jobs:
     steps:
       - name: リポジトリのチェックアウト
         uses: actions/checkout@v4
+
+      - name: リポジトリ内のファイル確認
+        run: |
+          echo "現在のディレクトリ"
+          pwd
+
+          echo "ファイル一覧"
+          ls -la
+
+          echo "Pythonファイル一覧"
+          find . -maxdepth 3 -type f -name "*.py" -print
 
       - name: Pythonのセットアップ
         uses: actions/setup-python@v5
@@ -90,37 +101,40 @@ jobs:
 
           echo "必須設定を確認しました"
 
+      - name: main.pyの構文確認
+        run: |
+          if [ ! -f "main.py" ]; then
+            echo "::error::リポジトリ直下にmain.pyがありません"
+            find . -maxdepth 3 -type f -name "*.py" -print
+            exit 1
+          fi
+
+          python -m py_compile main.py
+          echo "main.pyの構文チェックに成功しました"
+
       - name: 動画の生成とYouTube投稿
         env:
-          # 既存のGitHub Secrets
           TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
-          # OpenRouterは登録した場合だけ使用
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: "openrouter/free"
 
-          # GeminiはOpenRouter失敗時の予備
           GEMINI_MODEL: "gemini-2.5-flash"
 
-          # スプレッドシートまたは手動入力から渡される情報
           INPUT_VIDEO_TITLE: ${{ inputs.video_title }}
           INPUT_VIDEO_GENRE: ${{ inputs.video_genre }}
           INPUT_VIDEO_TONE: ${{ inputs.video_tone }}
           INPUT_SPREADSHEET_ROW: ${{ inputs.spreadsheet_row }}
 
-          # ナレーション
           EDGE_VOICE: "ja-JP-NanamiNeural"
           NARRATION_SPEED: "1.10"
 
-          # 初回は非公開
           PRIVACY_STATUS: "private"
 
-          # 動画投稿設定
           UPLOAD_TO_YOUTUBE: "true"
           DRY_RUN: ${{ inputs.dry_run }}
 
-          # 出力先
           WORK_DIR: "work"
 
         run: |
@@ -136,6 +150,8 @@ jobs:
             work/final.mp4
             work/thumbnail.jpg
             work/metadata.json
+            work/script.json
+            work/research.json
             work/subtitles.srt
             work/raw_video.mp4
             work/narration.m4a
