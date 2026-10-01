@@ -564,9 +564,10 @@ def create_script(llm, theme, genre, tone, sources):
 480〜600秒、約4700〜5500文字、9〜11シーン。
 冒頭15秒は強い疑問と意外性。
 各シーンに原稿と深く関連するvisual_cutsを8〜12個作る。
-各カットにnarration_excerpt、具体的な英語query、
-fallback_query、短い日本語card_title、card_pointsを入れる。
+各カットにnarration_excerpt、具体的な英語query、fallback_query、短い日本語card_title、card_pointsを入れる。
+特に、テーマに関連する象徴的な遺物や具体的アイテム（例：ツタンカーメンなら "Golden Mask", "Sarcophagus", "Ancient Egyptian jewelry" など）を英語queryに具体的に含め、抽象的な表現（"documentary footage" など）だけにならないようにすること。
 原稿にない要素、著名人、企業ロゴ、商品名を検索語へ追加しない。
+「検索クエリには、"close up", "hyper-realistic", "museum exhibit", "gold texture" などの視覚的特徴を表す単語を組み合わせて、高品質な素材がヒットするように設計してください。」
 最終シーンはまとめ。JSON以外は禁止。
 
 参考資料:
