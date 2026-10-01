@@ -3,7 +3,7 @@
 import asyncio, html, json, logging, math, os, random, re, shutil, subprocess, time
 from pathlib import Path
 import edge_tts, requests, trafilatura
-from ddgs import DDGS
+from duckduckgo_search import DDGS # 修正: ddgs -> duckduckgo_search
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -319,20 +319,22 @@ def research(theme):
     ):
         log.info("Web検索: %s", query)
         try:
-            for item in DDGS(timeout=15).text(
-                query,
-                region="jp-jp",
-                max_results=5,
-            ):
-                url = str(item.get("href", ""))
-                if url and url not in seen:
-                    seen.add(url)
-                    results.append(item)
+            # 修正: DDGSの呼び出し方を修正
+            with DDGS() as ddgs:
+                for item in ddgs.text(
+                    query,
+                    region="jp-jp",
+                    max_results=5,
+                ):
+                    url = str(item.get("href", ""))
+                    if url and url not in seen:
+                        seen.add(url)
+                        results.append(item)
         except Exception as error:
             log.warning("Web検索失敗: %s", error)
 
     sources = []
-    for item in results[:10\]:
+    for item in results[:10]: # 修正: 不要な \ を削除
         url = str(item.get("href", ""))
         try:
             page = trafilatura.fetch_url(url)
@@ -1126,7 +1128,7 @@ def create_card(scene, specification, index):
 
     y_position = 310
 
-    for point in points[:3\]:
+    for point in points[:3]:
         draw.ellipse(
             (
                 92,
@@ -1599,8 +1601,9 @@ def main():
     ).strip()
 
     if not theme:
+        # 修正: クォーテーションを追加
         raise RuntimeError(
-           INPUT_VIDEO_TITLEが空です。"
+           "INPUT_VIDEO_TITLEが空です。"
         )
 
     log.info("=" * 60)
