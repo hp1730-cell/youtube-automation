@@ -724,7 +724,7 @@ def research_theme(
 
     sources = []
 
-    for result in search_results[:10\]:
+    for result in search_results[:10]:
         result_url = str(
             result.get(
                 "href",
@@ -842,7 +842,7 @@ def validate_script(
             )
         )
 
-        if not scene["narration"\]:
+        if not scene["narration"]:
             raise RuntimeError(
                 "シーン{}の原稿が空です。".format(
                     scene_number
