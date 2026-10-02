@@ -1009,7 +1009,6 @@ def normalize(
         ):
             target_cuts = []
 
-        if
         def subtitle_chunks(text):
     output = []
 
@@ -1045,23 +1044,17 @@ def normalize(
             else:
                 position += 1
 
-            chunk = sentence[
-                :position
-            ].strip()
+            chunk = sentence[:position].strip()
 
             if chunk:
                 output.append(chunk)
 
-            sentence = sentence[
-                position:
-            ].strip()
+            sentence = sentence[position:].strip()
 
         if sentence:
             output.append(sentence)
 
-    return output or [
-        clean(text)
-    ]
+    return output or [clean(text)]
 
 
 async def synthesize(
