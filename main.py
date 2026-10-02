@@ -10,7 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-VERSION = "2026.10.01-local-scene-fix-v3"
+VERSION = "2026.10.01-groq-support-v1"
 WORK = Path(os.getenv("WORK_DIR", "work"))
 WORK.mkdir(parents=True, exist_ok=True)
 
@@ -24,8 +24,8 @@ DRY = os.getenv("DRY_RUN", "true").lower() == "true"
 UPLOAD = os.getenv("UPLOAD_TO_YOUTUBE", "true").lower() == "true"
 PRIVACY = os.getenv("PRIVACY_STATUS", "private")
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+# Groqモデルの指定
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 PIXABAY_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
 RESULTS = int(os.getenv("PIXABAY_RESULTS_PER_QUERY", "20"))
 BGM = Path(os.getenv("BGM_PATH", "assets/background_music.mp3"))
@@ -188,17 +188,13 @@ def parse_json(text):
 
 class LLM:
     def __init__(self):
-        self.openrouter = os.getenv(
-            "OPENROUTER_API_KEY",
-            "",
-        ).strip()
-        self.gemini = os.getenv(
-            "GEMINI_API_KEY",
+        self.groq = os.getenv(
+            "GROQ_API_KEY",
             "",
         ).strip()
 
-        if not self.openrouter and not self.gemini:
-            raise RuntimeError("LLM APIキーがありません。")
+        if not self.groq:
+            raise RuntimeError("GROQ_API_KEYがありません。")
 
     def post(self, url, headers, payload):
         last_error = None
@@ -237,78 +233,38 @@ class LLM:
         )
 
     def ask(self, prompt):
-        errors = []
-
-        if self.openrouter:
-            try:
-                result = self.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    {
-                        "Authorization": "Bearer " + self.openrouter,
-                        "Content-Type": "application/json",
-                    },
-                    {
-                        "model": OPENROUTER_MODEL,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "有効なJSONだけを返してください。"
-                                ),
-                            },
-                            {
-                                "role": "user",
-                                "content": prompt,
-                            },
-                        ],
-                        "temperature": 0.35,
-                        "max_tokens": 16000,
-                    },
-                )
-                return parse_json(
-                    result["choices"][0]["message"]["content"]
-                )
-            except Exception as error:
-                errors.append(
-                    "OpenRouter: " + str(error)
-                )
-
-        if self.gemini:
-            try:
-                url = (
-                    "https://generativelanguage.googleapis.com/"
-                    "v1beta/models/{}:generateContent?key={}"
-                ).format(
-                    GEMINI_MODEL,
-                    self.gemini,
-                )
-                result = self.post(
-                    url,
-                    {"Content-Type": "application/json"},
-                    {
-                        "contents": [
-                            {"parts": [{"text": prompt}]}
-                        ],
-                        "generationConfig": {
-                            "temperature": 0.35,
-                            "maxOutputTokens": 16000,
-                            "responseMimeType": "application/json",
+        try:
+            result = self.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                {
+                    "Authorization": "Bearer " + self.groq,
+                    "Content-Type": "application/json",
+                },
+                {
+                    "model": GROQ_MODEL,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "有効なJSONだけを返してください。"
+                            ),
                         },
-                    },
-                )
-                return parse_json(
-                    result["candidates"][0]
-                    ["content"]["parts"][0]["text"]
-                )
-            except Exception as error:
-                errors.append(
-                    "Gemini: " + str(error)
-                )
-
-        raise RuntimeError(
-            "すべてのLLM処理に失敗しました。\n"
-            + "\n".join(errors)
-        )
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        },
+                    ],
+                    "temperature": 0.35,
+                    "max_tokens": 8000,
+                },
+            )
+            return parse_json(
+                result["choices"][0]["message"]["content"]
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "Groq API処理に失敗しました: {}".format(error)
+            )
 
 
 def research(theme):
