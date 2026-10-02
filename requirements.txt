@@ -5,3 +5,4 @@ trafilatura
 google-api-python-client
 google-auth-oauthlib
 Pillow
+json_repair
