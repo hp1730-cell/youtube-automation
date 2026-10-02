@@ -28,7 +28,7 @@ from googleapiclient.http import MediaFileUpload
 from json_repair import repair_json
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-VERSION = "2026.10.02-clean-rebuild-v1"
+VERSION = "2026.10.02-groq-json-fix-v2"
 WORK = Path(os.getenv("WORK_DIR", "work"))
 WORK.mkdir(parents=True, exist_ok=True)
 W, H, FPS = 1280, 720, 30
@@ -160,12 +160,11 @@ class LLM:
         payload = {
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content": "有効なJSONオブジェクトだけを返してください。前置き、Markdown、コードフェンスは禁止です。"},
+                {"role": "system", "content": "JSONオブジェクトだけを返してください。前置き、Markdown、コードフェンスは禁止です。出力が長すぎる場合は説明を短くしても、必ず閉じ括弧まで完成させてください。"},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.35,
             "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
         }
         if GROQ_MODEL.startswith("openai/gpt-oss"):
             payload["reasoning_effort"] = "low"
@@ -182,11 +181,11 @@ class LLM:
             return self.request(prompt, GROQ_MAX_TOKENS)
         except Exception as first:
             text = str(first)
-            if not any(x in text for x in ("HTTP 413", "Request too large", "tokens per minute", "rate_limit_exceeded")):
+            if not any(x in text for x in ("HTTP 400", "json_validate_failed", "HTTP 413", "Request too large", "tokens per minute", "rate_limit_exceeded")):
                 raise
-            log.warning("Groq上限超過。参考資料を省略して再試行します。")
+            log.warning("GroqのJSON生成またはトークン上限で失敗。参考資料と出力量を圧縮して再試行します。")
             compact = re.sub(r"参考資料:\s*.*?\n\s*出力形式:", "参考資料:\n容量制限のため省略。一般に確認されている事実のみ使用。\n\n出力形式:", prompt, flags=re.S)
-            return self.request(compact, min(GROQ_MAX_TOKENS, 4000))
+            return self.request(compact, min(GROQ_MAX_TOKENS, 3800))
 
 
 def research(theme):
@@ -301,10 +300,10 @@ def create_script(llm, theme, genre, tone, sources):
 ジャンル: {genre}
 トーン: {tone}
 条件:
-- 8〜10分、ナレーション約4700〜5500文字、9〜11シーン
+- 8〜10分、ナレーション約3800〜4600文字、9〜11シーン
 - 冒頭15秒は強い疑問か意外な事実
 - 重複や冗長な前置きを避ける
-- 各シーンに原稿と直接対応するvisual_cutsを4個
+- 各シーンに原稿と直接対応するvisual_cutsを2個
 - queryとfallback_queryは具体的な英語検索語
 - 原稿にない著名人、企業、商品を追加しない
 - 最後は要点のまとめ
