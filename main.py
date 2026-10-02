@@ -32,7 +32,7 @@ VERSION = "2026.10.02-groq-json-fix-v2"
 WORK = Path(os.getenv("WORK_DIR", "work"))
 WORK.mkdir(parents=True, exist_ok=True)
 W, H, FPS = 1280, 720, 30
-MIN_SEC, TARGET_SEC, MAX_SEC = 480, 540, 600
+MIN_SEC, TARGET_SEC, MAX_SEC = 300, 360, 600
 MIN_CUT, MAX_CUT = 3.2, 7.0
 VOICE = os.getenv("EDGE_VOICE", "ja-JP-NanamiNeural")
 RATE = os.getenv("EDGE_VOICE_RATE", "+0%")
