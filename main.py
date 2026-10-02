@@ -25,7 +25,7 @@ UPLOAD = os.getenv("UPLOAD_TO_YOUTUBE", "true").lower() == "true"
 PRIVACY = os.getenv("PRIVACY_STATUS", "private")
 
 # Groqモデルの指定
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
 PIXABAY_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
 RESULTS = int(os.getenv("PIXABAY_RESULTS_PER_QUERY", "20"))
 BGM = Path(os.getenv("BGM_PATH", "assets/background_music.mp3"))
