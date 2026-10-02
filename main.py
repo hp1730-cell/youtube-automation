@@ -9,6 +9,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from json_repair import json_repair
 
 VERSION = "2026.10.01-groq-support-v1"
 WORK = Path(os.getenv("WORK_DIR", "work"))
@@ -162,13 +163,17 @@ def parse_json(text):
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        match = re.search(r"(\{.*\}|\[.*\])", text, re.S)
-        if not match:
-            raise RuntimeError("LLM応答にJSONがありません。")
         try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError as error:
-            raise RuntimeError("JSONのパースに失敗しました: {}\n該当テキスト: {}".format(error, text[:300]))
+            # 途切れたり崩れたりしたJSONを json_repair で自動修復
+            data = json_repair.loads(text)
+        except Exception:
+            match = re.search(r"(\{.*\}|\[.*\])", text, re.S)
+            if not match:
+                raise RuntimeError("LLM応答にJSONがありません。")
+            try:
+                data = json_repair.loads(match.group(0))
+            except Exception as error:
+                raise RuntimeError("JSONのパースに失敗しました: {}\n該当テキスト: {}".format(error, text[:300]))
 
     if isinstance(data, list):
         data = {
@@ -313,7 +318,7 @@ def research(theme):
                 {
                     "title": str(item.get("title", "")),
                     "url": url,
-                    "text": text[:1500],
+                    "text": text[:5000],
                 }
             )
         if len(sources) >= 5:
