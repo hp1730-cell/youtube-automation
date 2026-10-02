@@ -92,7 +92,7 @@ jobs:
 
       - name: main.pyの構文確認
         run: |
-          if [ - ! -f "main.py" ]; then
+          if [ ! -f "main.py" ]; then
             echo "::error::リポジトリ直下にmain.pyがありません"
             exit 1
           fi
