@@ -162,10 +162,13 @@ def parse_json(text):
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.S)
+        match = re.search(r"(\{.*\}|\[.*\])", text, re.S)
         if not match:
             raise RuntimeError("LLM応答にJSONがありません。")
-        data = json.loads(match.group(0))
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError as error:
+            raise RuntimeError("JSONのパースに失敗しました: {}\n該当テキスト: {}".format(error, text[:300]))
 
     if isinstance(data, list):
         data = {
@@ -1161,8 +1164,8 @@ def image_clip(source, output, seconds):
         "crop=1600:900,"
         "zoompan=z='min(zoom+0.0005,1.10)':"
         "d={}:s=1280x720:fps=30,"
-        "fade=t=in:st=0:d=0.22," # 修正: .22 -> 0.22
-        "fade=t=out:st={:.3f}:d=0.22," # 修正: .22 -> 0.22
+        "fade=t=in:st=0:d=0.22,"
+        "fade=t=out:st={:.3f}:d=0.22,"
         "format=yuv420p"
     ).format(frames, fade)
 
@@ -1209,8 +1212,8 @@ def video_clip(source, output, seconds, index):
         "force_original_aspect_ratio=increase,"
         "crop=1280:720,"
         "fps=30,"
-        "fade=t=in:st=0:d=0.18," # 修正: .18 -> 0.18
-        "fade=t=out:st={:.3f}:d=0.18," # 修正: .18 -> 0.18
+        "fade=t=in:st=0:d=0.18,"
+        "fade=t=out:st={:.3f}:d=0.18,"
         "format=yuv420p"
     ).format(fade)
 
