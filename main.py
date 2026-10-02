@@ -313,7 +313,7 @@ def research(theme):
                 {
                     "title": str(item.get("title", "")),
                     "url": url,
-                    "text": text[:5000],
+                    "text": text[:1500],
                 }
             )
         if len(sources) >= 5:
