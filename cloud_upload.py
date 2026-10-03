@@ -17,1003 +17,409 @@ from pathlib import Path
 import edge_tts
 import requests
 import trafilatura
-from ddgs import DDGS
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from json_repair import repair_json
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-
+VERSION = "2026.10.02-groq-json-fix-v2-improved"
 WORK = Path(os.getenv("WORK_DIR", "work"))
 WORK.mkdir(parents=True, exist_ok=True)
-
-WIDTH = 1280
-HEIGHT = 720
-FPS = 30
-
-MIN_SECONDS = 480
-TARGET_SECONDS = 540
-MAX_SECONDS = 600
-
-MIN_CUT_SECONDS = 5.0
-MAX_CUT_SECONDS = 8.0
-
+W, H, FPS = 1280, 720, 30
+MIN_SEC, TARGET_SEC, MAX_SEC = 300, 360, 600
+MIN_CUT, MAX_CUT = 3.2, 7.0
 VOICE = os.getenv("EDGE_VOICE", "ja-JP-NanamiNeural")
-VOICE_RATE = os.getenv("EDGE_VOICE_RATE", "+0%")
-PRIVACY_STATUS = os.getenv("PRIVACY_STATUS", "private")
-
-DRY_RUN = os.getenv(
-    "DRY_RUN",
-    "true",
-).strip().lower() == "true"
-
-UPLOAD_TO_YOUTUBE = os.getenv(
-    "UPLOAD_TO_YOUTUBE",
-    "true",
-).strip().lower() == "true"
-
-GEMINI_MODEL = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-3.1-flash-lite",
-)
-
-OPENROUTER_MODEL = os.getenv(
-    "OPENROUTER_MODEL",
-    "openrouter/free",
-)
-
-PIXABAY_API_KEY = os.getenv(
-    "PIXABAY_API_KEY",
-    "",
-).strip()
-
-PIXABAY_RESULTS = int(
-    os.getenv(
-        "PIXABAY_RESULTS_PER_QUERY",
-        "20",
-    )
-)
-
-BGM_PATH = Path(
-    os.getenv(
-        "BGM_PATH",
-        "assets/background_music.mp3",
-    )
-)
-
-USED_VIDEO_IDS = set()
-USED_VIDEO_URLS = set()
-USED_PAGE_URLS = set()
-PIXABAY_CACHE = {}
-
-FONT_CANDIDATES = [
+RATE = os.getenv("EDGE_VOICE_RATE", "+0%")
+DRY = os.getenv("DRY_RUN", "true").lower() == "true"
+UPLOAD = os.getenv("UPLOAD_TO_YOUTUBE", "true").lower() == "true"
+PRIVACY = os.getenv("PRIVACY_STATUS", "private")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "4300"))
+PIXABAY_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
+RESULTS = max(3, min(50, int(os.getenv("PIXABAY_RESULTS_PER_QUERY", "20"))))
+BGM = Path(os.getenv("BGM_PATH", "assets/background_music.mp3"))
+SOURCE_LIMIT = max(1, min(4, int(os.getenv("RESEARCH_SOURCE_LIMIT", "3"))))
+SOURCE_CHARS = max(300, min(1000, int(os.getenv("RESEARCH_CHARS_PER_SOURCE", "600"))))
+USED_IDS, USED_URLS, USED_PAGES, CACHE = set(), set(), set(), {}
+FONTS = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
 ]
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("youtube-auto")
 
 
-def run_command(command, timeout=1800):
-    log.info("コマンド実行: %s", command[0])
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "{}の実行に失敗しました。\n{}".format(
-                command[0],
-                result.stderr[-5000:],
-            )
-        )
-
+def run(cmd, timeout=1800):
+    log.info("コマンド実行: %s", cmd[0])
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError("{}失敗\n{}".format(cmd[0], result.stderr[-5000:]))
     return result
 
 
-def get_font_path():
-    for font_path in FONT_CANDIDATES:
-        if Path(font_path).exists():
-            return font_path
-
-    raise RuntimeError(
-        "日本語フォントがありません。"
-        "fonts-noto-cjkをインストールしてください。"
-    )
+def font_path():
+    for path in FONTS:
+        if Path(path).exists():
+            return path
+    raise RuntimeError("日本語フォントがありません。fonts-noto-cjkを導入してください。")
 
 
-def check_runtime():
-    for command in ("ffmpeg", "ffprobe"):
-        if not shutil.which(command):
-            raise RuntimeError(
-                "{}がありません。".format(command)
-            )
-
-    get_font_path()
-
-    if not PIXABAY_API_KEY:
-        raise RuntimeError(
-            "PIXABAY_API_KEYが未設定です。"
-        )
-
-
-def clean_text(text):
-    value = html.unescape(str(text))
+def clean(value):
+    value = html.unescape(str(value or ""))
+    value = re.sub(r"<[^>]+>", "", value)
     value = re.sub(r"https?://\S+", "", value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def parse_json_response(response_text):
-    cleaned = re.sub(
-        r"^```(?:json)?\s*|\s*```$",
-        "",
-        str(response_text).strip(),
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-    try:
-        return json.loads(cleaned)
-
-    except json.JSONDecodeError:
-        match = re.search(
-            r"\{.*\}",
-            cleaned,
-            flags=re.DOTALL,
-        )
-
-        if not match:
-            raise RuntimeError(
-                "LLM応答にJSONがありません。"
-            )
-
-        return json.loads(match.group(0))
+def duration(path):
+    result = run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)], 60)
+    raw = result.stdout.strip()
+    if not raw:
+        raise RuntimeError("再生時間を取得できません: {}".format(path))
+    return float(raw)
 
 
-def get_json_secret(name):
-    raw_value = os.getenv(name, "").strip()
-
-    if not raw_value:
-        raise RuntimeError(
-            "{}が未設定です。".format(name)
-        )
-
-    return json.loads(raw_value)
-
-
-def probe_duration(media_path):
-    result = run_command(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-            str(media_path),
-        ],
-        timeout=60,
-    )
-
-    return float(result.stdout.strip())
+def secret(name):
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        raise RuntimeError(name + "が未設定です。")
+    return json.loads(raw)
 
 
 def ass_time(seconds):
-    centiseconds = max(
-        0,
-        int(round(float(seconds) * 100)),
-    )
-
-    hours, centiseconds = divmod(
-        centiseconds,
-        360000,
-    )
-
-    minutes, centiseconds = divmod(
-        centiseconds,
-        6000,
-    )
-
-    seconds_value, centiseconds = divmod(
-        centiseconds,
-        100,
-    )
-
-    return "{}:{:02}:{:02}.{:02}".format(
-        hours,
-        minutes,
-        seconds_value,
-        centiseconds,
-    )
+    cs = max(0, int(round(seconds * 100)))
+    hours, cs = divmod(cs, 360000)
+    minutes, cs = divmod(cs, 6000)
+    seconds, cs = divmod(cs, 100)
+    return "{}:{:02d}:{:02d}.{:02d}".format(hours, minutes, seconds, cs)
 
 
-def escape_ass_text(text):
-    value = str(text)
-    value = value.replace("\\", r"\\")
-    value = value.replace("{", r"\{")
-    value = value.replace("}", r"\}")
-    return value
+def ass_escape(value):
+    return str(value).replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}").replace("\n", r"\N")
 
 
-def search_tokens(text):
-    ignored_words = {
-        "the", "and", "with", "from", "into",
-        "inside", "outside", "close", "view",
-        "footage", "video", "scene", "real",
-        "documentary", "showing", "during",
-        "while", "near", "over", "under",
-    }
-
-    words = re.findall(
-        r"[a-z0-9]+",
-        str(text).lower(),
-    )
-
-    return {
-        word
-        for word in words
-        if len(word) >= 3
-        and word not in ignored_words
-    }
+def wrap(value, length):
+    value = clean(value)
+    return "\n".join(value[i:i + length] for i in range(0, len(value), length)) if value else ""
 
 
-class LLMClient:
+def word_tokens(value):
+    ignored = {"the", "and", "with", "from", "into", "inside", "outside", "close", "view", "footage", "video", "scene", "real", "documentary", "showing", "during", "while", "near", "over", "under", "high", "quality", "hyper", "realistic"}
+    return {w for w in re.findall(r"[a-z0-9]+", str(value).lower()) if len(w) >= 3 and w not in ignored}
 
+
+def parse_json(text):
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(text or "").strip(), flags=re.I | re.S)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = json.loads(repair_json(text))
+    if isinstance(data, list):
+        data = {"title": "", "description": "", "genre": "", "tags": [], "scenes": data}
+    if not isinstance(data, dict):
+        raise RuntimeError("LLM応答がJSONオブジェクトではありません。")
+    return data
+
+
+class LLM:
     def __init__(self):
-        self.openrouter_key = os.getenv(
-            "OPENROUTER_API_KEY",
-            "",
-        ).strip()
+        self.key = os.getenv("GROQ_API_KEY", "").strip()
+        if not self.key:
+            raise RuntimeError("GROQ_API_KEYがありません。")
 
-        self.gemini_key = os.getenv(
-            "GEMINI_API_KEY",
-            "",
-        ).strip()
-
-        if not self.openrouter_key and not self.gemini_key:
-            raise RuntimeError(
-                "GEMINI_API_KEYまたは"
-                "OPENROUTER_API_KEYが必要です。"
-            )
-
-    def post(self, url, headers, payload):
+    def post(self, payload):
         last_error = None
-
         for attempt in range(5):
-            wait_seconds = (
-                min(90, 5 * (2 ** attempt))
-                + random.uniform(0, 3)
-            )
-
             try:
                 response = requests.post(
-                    url,
-                    headers=headers,
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": "Bearer " + self.key, "Content-Type": "application/json"},
                     json=payload,
                     timeout=180,
                 )
-
                 if response.status_code < 400:
                     return response.json()
-
-                last_error = RuntimeError(
-                    "HTTP {}: {}".format(
-                        response.status_code,
-                        response.text[:700],
-                    )
-                )
-
-                if response.status_code not in {
-                    408, 429, 500, 502, 503, 504
-                }:
+                last_error = RuntimeError("HTTP {}: {}".format(response.status_code, response.text[:1500]))
+                if response.status_code == 413 or response.status_code not in {408, 429, 500, 502, 503, 504}:
                     raise last_error
-
+                wait = float(response.headers.get("retry-after", min(60, 5 * 2 ** attempt))) + random.random()
             except requests.RequestException as error:
                 last_error = error
+                wait = min(60, 5 * 2 ** attempt) + random.random()
+            log.warning("Groq API再試行まで%.1f秒", wait)
+            time.sleep(wait)
+        raise RuntimeError("Groq API呼び出し失敗: {}".format(last_error))
 
-            log.warning(
-                "API再試行まで%.1f秒",
-                wait_seconds,
-            )
+    def request(self, prompt, max_tokens):
+        # ③ パラメータチューニングの適用
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": "JSONオブジェクトだけを返してください。前置き、Markdown、コードフェンスは禁止です。出力が長すぎる場合は説明を短くしても、必ず閉じ括弧まで完成させてください。"},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.65,        # 多様性を生むために引き上げ
+            "frequency_penalty": 0.35,  # 反復表現を抑制
+            "max_tokens": max_tokens,
+        }
+        if GROQ_MODEL.startswith("openai/gpt-oss"):
+            payload["reasoning_effort"] = "low"
+        result = self.post(payload)
+        choices = result.get("choices", [])
+        if not choices or not choices[0].get("message", {}).get("content"):
+            raise RuntimeError("Groq応答本文が空です。")
+        usage = result.get("usage", {})
+        log.info("Groq使用量 input=%s output=%s total=%s", usage.get("prompt_tokens", "?"), usage.get("completion_tokens", "?"), usage.get("total_tokens", "?"))
+        return parse_json(choices[0]["message"]["content"])
 
-            time.sleep(wait_seconds)
-
-        raise RuntimeError(
-            "API呼び出し失敗: {}".format(
-                last_error
-            )
-        )
-
-    def ask(
-        self,
-        prompt,
-        max_tokens=16000,
-        temperature=0.35,
-    ):
-        errors = []
-
-        if self.openrouter_key:
-            try:
-                result = self.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    {
-                        "Authorization": (
-                            "Bearer " + self.openrouter_key
-                        ),
-                        "Content-Type": "application/json",
-                    },
-                    {
-                        "model": OPENROUTER_MODEL,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "日本語の映像ディレクターです。"
-                                    "有効なJSONだけを返してください。"
-                                ),
-                            },
-                            {
-                                "role": "user",
-                                "content": prompt,
-                            },
-                        ],
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                    },
-                )
-
-                return parse_json_response(
-                    result["choices"][0]
-                    ["message"]["content"]
-                )
-
-            except Exception as error:
-                errors.append(
-                    "OpenRouter失敗: {}".format(error)
-                )
-
-        if self.gemini_key:
-            try:
-                url = (
-                    "https://generativelanguage.googleapis.com/"
-                    "v1beta/models/{}:generateContent?key={}"
-                ).format(
-                    GEMINI_MODEL,
-                    self.gemini_key,
-                )
-
-                result = self.post(
-                    url,
-                    {"Content-Type": "application/json"},
-                    {
-                        "contents": [
-                            {
-                                "parts": [
-                                    {"text": prompt}
-                                ]
-                            }
-                        ],
-                        "generationConfig": {
-                            "temperature": temperature,
-                            "maxOutputTokens": max_tokens,
-                            "responseMimeType": (
-                                "application/json"
-                            ),
-                        },
-                    },
-                )
-
-                return parse_json_response(
-                    result["candidates"][0]
-                    ["content"]["parts"][0]["text"]
-                )
-
-            except Exception as error:
-                errors.append(
-                    "Gemini失敗: {}".format(error)
-                )
-
-        raise RuntimeError(
-            "すべてのLLM処理に失敗しました。\n"
-            + "\n".join(errors)
-        )
-
-
-def research_theme(theme):
-    search_results = []
-    seen_urls = set()
-
-    queries = [
-        theme,
-        "{} 仕組み 理由".format(theme),
-        "{} 意外な事実".format(theme),
-    ]
-
-    for query in queries:
-        log.info("Web検索: %s", query)
-
+    def ask(self, prompt):
         try:
-            results = DDGS(
-                timeout=15
-            ).text(
-                query,
-                region="jp-jp",
-                max_results=5,
-            )
+            return self.request(prompt, GROQ_MAX_TOKENS)
+        except Exception as first:
+            text = str(first)
+            if not any(x in text for x in ("HTTP 400", "json_validate_failed", "HTTP 413", "Request too large", "tokens per minute", "rate_limit_exceeded")):
+                raise
+            log.warning("GroqのJSON生成またはトークン上限で失敗。参考資料と出力量を圧縮して再試行します。")
+            compact = re.sub(r"参考資料:\s*.*?\n\s*出力形式:", "参考資料:\n容量制限のため省略。一般に確認されている事実のみ使用。\n\n出力形式:", prompt, flags=re.S)
+            return self.request(compact, min(GROQ_MAX_TOKENS, 3800))
 
-            for result in results:
-                url = str(
-                    result.get("href", "")
-                )
 
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    search_results.append(result)
-
+def research(theme):
+    results, seen = [], set()
+    for query in (theme, theme + " 仕組み 理由", theme + " 意外な事実"):
+        log.info("Web検索: %s", query)
+        try:
+            with DDGS() as ddgs:
+                for item in ddgs.text(query, region="jp-jp", max_results=5):
+                    url = str(item.get("href", "")).strip()
+                    if url and url not in seen:
+                        seen.add(url)
+                        results.append(item)
         except Exception as error:
-            log.warning(
-                "Web検索失敗: %s",
-                error,
-            )
-
+            log.warning("Web検索失敗: %s", error)
     sources = []
-
-    for result_index, result in enumerate(
-        search_results
-    ):
-        if result_index >= 10:
-            break
-
-        url = str(result.get("href", ""))
-
+    for item in results[:10]:
+        url = str(item.get("href", "")).strip()
+        body = ""
         try:
             page = trafilatura.fetch_url(url)
-
             if page:
-                extracted = (
-                    trafilatura.extract(
-                        page,
-                        favor_precision=True,
-                    )
-                    or ""
-                )
-            else:
-                extracted = ""
-
-        except Exception:
-            extracted = ""
-
-        page_text = clean_text(
-            extracted
-            or result.get("body", "")
-        )
-
-        if len(page_text) >= 200:
-            sources.append(
-                {
-                    "title": str(
-                        result.get("title", "")
-                    ),
-                    "url": url,
-                    "text": page_text[:5000],
-                }
-            )
-
-        if len(sources) >= 5:
+                body = trafilatura.extract(page, favor_precision=True, include_comments=False, include_tables=False) or ""
+        except Exception as error:
+            log.warning("本文取得失敗: %s", error)
+        text = clean(body or item.get("body", ""))
+        if len(text) >= 120:
+            sources.append({"title": clean(item.get("title", ""))[:150], "url": url, "text": text[:SOURCE_CHARS]})
+        if len(sources) >= SOURCE_LIMIT:
             break
-
-    (WORK / "research.json").write_text(
-        json.dumps(
-            sources,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
+    (WORK / "research.json").write_text(json.dumps(sources, ensure_ascii=False, indent=2), encoding="utf-8")
     return sources
 
 
-def normalize_scene_count(script_data):
-    if not isinstance(script_data, dict):
-        raise RuntimeError(
-            "台本がJSONオブジェクトではありません。"
-        )
+def split_scene(scene, theme):
+    text = clean(scene.get("narration", "")) or "{}について詳しく見ていきます。".format(theme)
+    middle = len(text) // 2
+    cut = max(text.rfind(mark, 0, min(len(text), middle + 100)) for mark in "。！？")
+    cut = middle if cut < max(40, middle - 140) else cut + 1
+    cuts = scene.get("visual_cuts", []) if isinstance(scene.get("visual_cuts", []), list) else []
+    split = max(1, len(cuts) // 2)
+    first, second = dict(scene), dict(scene)
+    first["narration"] = text[:cut].strip() or text
+    second["narration"] = text[cut:].strip() or text
+    second["heading"] = clean(scene.get("heading", theme)) + " 続き"
+    first["visual_cuts"] = cuts[:split] or cuts
+    second["visual_cuts"] = cuts[split:] or cuts
+    return first, second
 
-    scenes = script_data.get("scenes", [])
 
-    if not isinstance(scenes, list):
-        raise RuntimeError(
-            "scenesが配列ではありません。"
-        )
-
-    if len(scenes) < 9:
-        raise RuntimeError(
-            "シーン数が不足しています: {}".format(
-                len(scenes)
-            )
-        )
-
+def normalize(data, theme):
+    if isinstance(data, list):
+        data = {"title": theme, "description": "", "genre": "", "tags": [], "scenes": data}
+    if not isinstance(data, dict):
+        raise RuntimeError("台本データを復元できません。")
+    scenes = data.get("scenes", [])
+    if not isinstance(scenes, list) or not scenes:
+        raise RuntimeError("台本にシーンがありません。")
+    while len(scenes) < 9:
+        index = max(range(len(scenes)), key=lambda i: len(clean(scenes[i].get("narration", ""))) if isinstance(scenes[i], dict) else 0)
+        raw = scenes.pop(index)
+        if not isinstance(raw, dict):
+            raw = {"heading": theme, "narration": str(raw), "visual_cuts": []}
+        first, second = split_scene(raw, theme)
+        scenes[index:index] = [first, second]
     while len(scenes) > 11:
-        extra_scene = scenes.pop()
-        target_scene = scenes[-1]
-
-        target_scene["narration"] = (
-            clean_text(
-                target_scene.get("narration", "")
-            )
-            + " "
-            + clean_text(
-                extra_scene.get("narration", "")
-            )
-        ).strip()
-
-        target_cuts = target_scene.get(
-            "visual_cuts",
-            [],
-        )
-
-        extra_cuts = extra_scene.get(
-            "visual_cuts",
-            [],
-        )
-
-        if not isinstance(target_cuts, list):
-            target_cuts = []
-
-        if isinstance(extra_cuts, list):
-            target_cuts.extend(extra_cuts)
-
-        target_scene["visual_cuts"] = (
-            target_cuts
-        )
-
-    script_data["scenes"] = scenes
-    return script_data
-
-
-def validate_script(script_data, theme):
-    script_data = normalize_scene_count(
-        script_data
-    )
-
-    scenes = script_data["scenes"]
-
-    for scene_number, scene in enumerate(
-        scenes,
-        start=1,
-    ):
+        extra = scenes.pop()
+        if not isinstance(extra, dict):
+            extra = {"narration": str(extra), "visual_cuts": []}
+        target = scenes[-1]
+        if not isinstance(target, dict):
+            target = {"heading": theme, "narration": str(target), "visual_cuts": []}
+            scenes[-1] = target
+        target["narration"] = (clean(target.get("narration", "")) + " " + clean(extra.get("narration", ""))).strip()
+        a = target.get("visual_cuts", []) if isinstance(target.get("visual_cuts", []), list) else []
+        b = extra.get("visual_cuts", []) if isinstance(extra.get("visual_cuts", []), list) else []
+        target["visual_cuts"] = a + b
+    for number, scene in enumerate(scenes, 1):
         if not isinstance(scene, dict):
-            raise RuntimeError(
-                "シーン{}が辞書ではありません。".format(
-                    scene_number
-                )
-            )
-
-        scene["heading"] = clean_text(
-            scene.get("heading")
-            or "シーン{}".format(scene_number)
-        )
-
-        scene["narration"] = clean_text(
-            scene.get("narration", "")
-        )
-
-        if not scene["narration"\]:
-            raise RuntimeError(
-                "シーン{}の原稿が空です。".format(
-                    scene_number
-                )
-            )
-
-        raw_cuts = scene.get(
-            "visual_cuts",
-            [],
-        )
-
-        if not isinstance(raw_cuts, list):
-            raw_cuts = []
-
-        valid_cuts = []
-
-        for raw_cut in raw_cuts:
-            if not isinstance(raw_cut, dict):
+            scene = {"heading": "シーン{}".format(number), "narration": str(scene), "visual_cuts": []}
+            scenes[number - 1] = scene
+        scene["heading"] = clean(scene.get("heading", "")) or "シーン{}".format(number)
+        scene["narration"] = clean(scene.get("narration", "")) or "{}について順番に整理します。".format(theme)
+        raw_cuts = scene.get("visual_cuts", []) if isinstance(scene.get("visual_cuts", []), list) else []
+        valid = []
+        for cut in raw_cuts:
+            if not isinstance(cut, dict):
                 continue
-
-            query = clean_text(
-                raw_cut.get("query", "")
-            )[:100]
-
-            if not query:
-                continue
-
-            fallback_query = clean_text(
-                raw_cut.get(
-                    "fallback_query",
-                    "",
-                )
-            )[:100]
-
-            if not fallback_query:
-                fallback_query = (
-                    "{} documentary footage"
-                ).format(theme)[:100]
-
-            points = raw_cut.get(
-                "card_points",
-                [],
-            )
-
-            if not isinstance(points, list):
-                points = []
-
-            valid_cuts.append(
-                {
-                    "narration_excerpt": clean_text(
-                        raw_cut.get(
-                            "narration_excerpt",
-                            "",
-                        )
-                    ),
-                    "query": query,
-                    "fallback_query": (
-                        fallback_query
-                    ),
-                    "card_title": clean_text(
-                        raw_cut.get(
-                            "card_title",
-                            "",
-                        )
-                    )[:28],
-                    "card_points": [
-                        clean_text(point)[:44]
-                        for point in points
-                        if clean_text(point)
-                    ][:3],
-                }
-            )
-
-        if not valid_cuts:
-            valid_cuts = [
-                {
-                    "narration_excerpt": (
-                        scene["narration"][:80]
-                    ),
-                    "query": (
-                        "{} documentary footage"
-                    ).format(theme)[:100],
-                    "fallback_query": (
-                        "{} close up"
-                    ).format(theme)[:100],
-                    "card_title": (
-                        scene["heading"][:28]
-                    ),
-                    "card_points": [],
-                }
-            ]
-
-        scene["visual_cuts"] = valid_cuts
-
-    return script_data
+            points = cut.get("card_points", []) if isinstance(cut.get("card_points", []), list) else []
+            valid.append({
+                "narration_excerpt": clean(cut.get("narration_excerpt", ""))[:120],
+                "query": (clean(cut.get("query", "")) or "{} subject".format(theme))[:100],
+                "fallback_query": (clean(cut.get("fallback_query", "")) or "{} close up".format(theme))[:100],
+                "card_title": (clean(cut.get("card_title", "")) or scene["heading"])[:28],
+                "card_points": [clean(x)[:44] for x in points if clean(x)][:3],
+            })
+        if not valid:
+            valid = [{"narration_excerpt": scene["narration"][:90], "query": "{} subject".format(theme)[:100], "fallback_query": "{} close up".format(theme)[:100], "card_title": scene["heading"][:28], "card_points": []}]
+        scene["visual_cuts"] = valid[:6]
+    data["scenes"] = scenes
+    data["title"] = clean(data.get("title", ""))[:100] or theme[:100]
+    data["description"] = str(data.get("description", "") or "").strip()
+    tags = data.get("tags", []) if isinstance(data.get("tags", []), list) else []
+    data["tags"] = [clean(x)[:30] for x in tags if clean(x)][:20]
+    return data
 
 
-def repair_script_structure(
-    llm,
-    script_data,
-):
-    prompt = """
-次のJSON台本を必ず9〜11シーンへ再構成してください。
+def create_script(llm, theme, genre, tone, sources):
+    refs = "\n\n".join("[{}] {}\nURL: {}\n{}".format(i + 1, s["title"][:120], s["url"], s["text"][:SOURCE_CHARS]) for i, s in enumerate(sources[:SOURCE_LIMIT]))
+    refs = refs or "資料不足。一般に確認されている事実のみ使用し、不確かな数値は断定しないこと。"
+    
+    # ④ アーキテクチャの分割：フェーズ1（構成案の作成）
+    log.info("フェーズ1: 動画の全体構成を生成中...")
+    prompt_outline = """テーマ「{theme}」のYouTube動画の「構成」と「映像指定」をJSONで設計してください。
+ジャンル: {genre}
+トーン: {tone}
 
-・内容と事実関係を維持
-・目標時間540秒
-・480〜600秒にする
-・各シーンにheading、narration、visual_cutsを入れる
-・各visual_cutにnarration_excerpt、query、
-  fallback_query、card_title、card_pointsを入れる
-・JSON以外は禁止
-
-台本:
-{}
-""".format(
-        json.dumps(
-            script_data,
-            ensure_ascii=False,
-        )
-    )
-
-    return llm.ask(
-        prompt,
-        max_tokens=16000,
-        temperature=0.25,
-    )
-
-
-def create_script(
-    llm,
-    theme,
-    genre,
-    tone,
-    sources,
-):
-    source_text = "\n\n".join(
-        (
-            "[{}] {}\n"
-            "URL: {}\n"
-            "{}"
-        ).format(
-            index + 1,
-            source["title"],
-            source["url"],
-            source["text"],
-        )
-        for index, source in enumerate(
-            sources
-        )
-    )
-
-    if not source_text:
-        source_text = (
-            "資料不足のため、断定的な数値を避け、"
-            "慎重に説明してください。"
-        )
-
-    prompt = """
-テーマ「{}」のYouTube動画台本をJSONで作成してください。
-
-ジャンル: {}
-トーン: {}
-
-必須条件:
-・実測480〜600秒、目標540秒
-・約4700〜5500文字
-・必ず9〜11シーン
-・冒頭15秒に強い疑問と意外性
-・各シーンにvisual_cutsを8〜12個
-・映像検索語は対応する原稿と深く関連
-・queryとfallback_queryは具体的な英語
-・主役、動作、場所、状況を含める
-・同じ説明を繰り返さない
-・最終シーンは要点のまとめ
-・JSON以外は禁止
+【構成の条件】
+- 9〜11シーンの構成にする
+- 冒頭は強い疑問か意外な事実から始める
+- 各シーンの原稿案（draft_points）として、語るべき要点を箇条書きで具体的に記載する
+- 各シーンに直接対応するvisual_cutsを2個作成（queryとfallback_queryは具体的な英語検索語）
+- JSON以外は禁止
 
 参考資料:
-{}
+{refs}
 
-JSON形式:
-{{
-  "title": "",
-  "description": "",
-  "genre": "",
-  "tags": [""],
-  "scenes": [
-    {{
-      "heading": "",
-      "narration": "",
-      "visual_cuts": [
-        {{
-          "narration_excerpt": "",
-          "query": "",
-          "fallback_query": "",
-          "card_title": "",
-          "card_points": ["", ""]
-        }}
-      ]
-    }}
-  ]
-}}
-""".format(
-        theme,
-        genre,
-        tone,
-        source_text,
-    )
+出力形式:
+{{"title":"","description":"","genre":"","tags":[""],"scenes":[{{"heading":"","draft_points":["要点1","要点2"],"visual_cuts":[{{"narration_excerpt":"","query":"","fallback_query":"","card_title":"","card_points":[""]}}]}}]}}
+""".format(theme=theme, genre=genre, tone=tone, refs=refs)
+    
+    data = llm.ask(prompt_outline)
+    if "scenes" not in data or not isinstance(data["scenes"], list):
+        data = {"title": theme, "description": "", "genre": genre, "tags": [], "scenes": [{"heading": theme, "draft_points": [theme], "visual_cuts": []}]}
+    
+    # ④ アーキテクチャの分割：フェーズ2（シーンごとに原稿を執筆）
+    # ② プロンプトの制約強化（表現の多様性、具体性、冗長さの排除）を適用
+    for i, scene in enumerate(data["scenes"]):
+        log.info("フェーズ2: シーン%d/%d のナレーション原稿を執筆中...", i + 1, len(data["scenes"]))
+        heading = scene.get("heading", "シーン{}".format(i + 1))
+        draft = scene.get("draft_points", [heading])
+        
+        prompt_scene = """以下の動画シーンのナレーション原稿を執筆し、JSONで返してください。
 
-    script_data = llm.ask(prompt)
+テーマ: {theme}
+トーン: {tone}
+シーン見出し: {heading}
+構成の要点: {draft}
 
-    for repair_attempt in range(3):
+【執筆条件（厳守）】
+- 文字数は必ず 350〜450文字 程度でしっかり書き込むこと。
+- 同じ言い回しの反復や、同じ語尾（〜です、〜ます等）の連続を厳格に避けること。
+- 一般論や抽象的な表現を避け、具体的な数値、歴史的背景、具体的な事例を必ず盛り込むこと。
+- 「さて」「次に」といった単調な接続詞を多用せず、視聴者の興味を惹きつけるストーリーテリングを意識すること。
+- JSON以外の前置きやマークダウンは一切禁止。
+
+出力形式:
+{{"narration": "執筆したナレーション原稿（改行は含めず、一つの文字列にする）"}}
+""".format(theme=theme, tone=tone, heading=heading, draft=draft)
+
         try:
-            script_data = validate_script(
-                script_data,
-                theme,
-            )
-            break
-
-        except RuntimeError as error:
-            if repair_attempt >= 2:
-                raise
-
-            log.warning(
-                "台本構造を再生成します: %s",
-                error,
-            )
-
-            script_data = repair_script_structure(
-                llm,
-                script_data,
-            )
-
-    description = str(
-        script_data.get("description", "")
-    ).strip()
-
-    source_urls = "\n".join(
-        "- " + source["url"]
-        for source in sources
-    )
-
-    if source_urls:
-        description += (
-            "\n\n参考資料\n"
-            + source_urls
-        )
-
-    description += (
-        "\n\n※AI・自動生成技術を"
-        "構成、音声、字幕、映像に使用しています。"
-    )
-
-    script_data["description"] = description
-    return script_data
+            # シーンごとの生成なのでmax_tokensは少なくても安定する
+            res = llm.request(prompt_scene, 1500)
+            scene["narration"] = clean(res.get("narration", ""))
+        except Exception as e:
+            log.warning("シーン%dの原稿生成に失敗しました: %s", i + 1, e)
+            scene["narration"] = "{}について詳しく見ていきます。".format(heading)
+            
+    data = normalize(data, theme)
+    urls = "\n".join("- " + s["url"] for s in sources[:SOURCE_LIMIT] if s.get("url"))
+    data["description"] = data.get("description", "") + (("\n\n参考資料\n" + urls) if urls else "") + "\n\n※AI・自動生成技術を使用しています。"
+    return data
 
 
-def revise_script_duration(
-    llm,
-    script_data,
-    actual_seconds,
-    theme,
-):
-    if actual_seconds < MIN_SECONDS:
-        instruction = "原稿を十分に増やす"
+def adjust_duration(llm, data, seconds, theme):
+    # ① 文字数補填ロジックの改修（固定文ループの廃止 -> LLMによる加筆）
+    ratio = TARGET_SEC / max(seconds, 1)
+    if seconds < MIN_SEC:
+        log.info("動画時間が不足しています(%.1f秒)。LLMでナレーションを加筆します。", seconds)
+        for i, scene in enumerate(data["scenes"]):
+            text = clean(scene.get("narration", ""))
+            target = int(len(text) * min(1.8, ratio))
+            if len(text) < target:
+                prompt = """以下のナレーションを、同じ言い回しの繰り返しを避け、具体例や詳細な解説を加えて {target}文字程度 に加筆してください。
+元のトーンを維持し、JSON以外の前置きは一切禁止です。
+元のナレーション: {text}
+
+出力形式: {{"narration": "加筆されたテキスト"}}""".format(target=target, text=text)
+                try:
+                    res = llm.request(prompt, 2000)
+                    if "narration" in res and res["narration"]:
+                        scene["narration"] = clean(res["narration"])
+                except Exception as e:
+                    log.warning("シーン%dの加筆処理失敗: %s", i + 1, e)
     else:
-        instruction = "原稿を十分に短くする"
-
-    prompt = """
-実測読み上げ時間は{:.1f}秒です。
-
-次の台本について、{}ことで、
-実測480〜600秒、目標540秒へ調整してください。
-
-・9〜11シーンを維持
-・事実関係を維持
-・visual_cutsも原稿に合わせて更新
-・JSON以外は禁止
-
-{}
-""".format(
-        actual_seconds,
-        instruction,
-        json.dumps(
-            script_data,
-            ensure_ascii=False,
-        ),
-    )
-
-    revised = llm.ask(
-        prompt,
-        max_tokens=16000,
-        temperature=0.25,
-    )
-
-    try:
-        return validate_script(
-            revised,
-            theme,
-        )
-
-    except RuntimeError:
-        repaired = repair_script_structure(
-            llm,
-            revised,
-        )
-
-        return validate_script(
-            repaired,
-            theme,
-        )
+        log.info("動画時間が長すぎるため、テキストを短縮します。")
+        for scene in data["scenes"]:
+            text = clean(scene.get("narration", ""))
+            shortened = text[:max(120, int(len(text) * max(0.68, ratio)))]
+            stop = max(shortened.rfind("。"), shortened.rfind("！"), shortened.rfind("？"))
+            scene["narration"] = shortened[:stop + 1] if stop > len(shortened) * 0.6 else shortened
+    return normalize(data, theme)
 
 
-def split_subtitles(
-    text,
-    minimum=9,
-    maximum=24,
-):
-    chunks = []
-
-    sentences = re.split(
-        r"(?<=[。！？!?])",
-        clean_text(text),
-    )
-
-    for sentence in sentences:
+def subtitle_chunks(text):
+    output = []
+    for sentence in re.split(r"(?<=[。！？!?])", clean(text)):
         sentence = sentence.strip()
-
-        while len(sentence) > maximum:
-            positions = [
-                sentence.rfind(
-                    mark,
-                    minimum,
-                    maximum + 1,
-                )
-                for mark in (
-                    "、",
-                    "，",
-                    " ",
-                )
-            ]
-
-            cut = max(positions)
-
-            if cut < minimum:
-                cut = maximum
-                chunks.append(
-                    sentence[:cut].strip()
-                )
-                sentence = sentence[cut:].strip()
-
-            else:
-                chunks.append(
-                    sentence[:cut + 1].strip()
-                )
-                sentence = sentence[cut + 1:].strip()
-
+        while len(sentence) > 24:
+            position = max(sentence.rfind(mark, 9, 25) for mark in ("、", "，", " "))
+            position = 24 if position < 9 else position + 1
+            output.append(sentence[:position].strip())
+            sentence = sentence[position:].strip()
         if sentence:
-            chunks.append(sentence)
+            output.append(sentence)
+    return output or [clean(text)]
 
-    return chunks or [clean_text(text)]
 
-
-async def synthesize_audio(
-    text,
-    output_path,
-):
+async def synthesize(text, path):
     last_error = None
-
     for attempt in range(4):
         try:
-            await edge_tts.Communicate(
-                text,
-                VOICE,
-                rate=VOICE_RATE,
-            ).save(
-                str(output_path)
-            )
-
-            if (
-                output_path.exists()
-                and output_path.stat().st_size > 1000
-            ):
+            await edge_tts.Communicate(text, VOICE, rate=RATE).save(str(path))
+            if path.exists() and path.stat().st_size > 1000:
                 return
-
         except Exception as error:
             last_error = error
-
-        if attempt < 3:
-            await asyncio.sleep(2 ** attempt)
-
-    raise RuntimeError(
-        "音声生成失敗: {}".format(
-            last_error
-        )
-    )
+        await asyncio.sleep(2 ** attempt)
+    raise RuntimeError("音声生成失敗: {}".format(last_error))
 
 
-def create_ass(
-    events,
-    scenes,
-    timeline,
-    output_path,
-):
+def make_ass(events, scenes, timeline, path):
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -1023,1337 +429,426 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Noto Sans CJK JP,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,3,4,1,2,90,90,58,1
-Style: Heading,Noto Sans CJK JP,38,&H00FFFFFF,&H00FFFFFF,&H00000000,&H88000000,-1,0,0,0,100,100,0,0,3,3,1,7,45,45,38,1
+Style: Default,Noto Sans CJK JP,46,&H00FFFFFF,&H00FFFFFF,&H00141414,&H96000000,-1,0,0,0,100,100,0,0,3,4,1,2,85,85,55,1
+Style: Heading,Noto Sans CJK JP,38,&H00FFFFFF,&H00FFFFFF,&H00141414,&H99000000,-1,0,0,0,100,100,0,0,3,3,1,7,42,42,35,1
+Style: Emphasis,Noto Sans CJK JP,50,&H005CE4FF,&H005CE4FF,&H00141414,&H99000000,-1,0,0,0,100,100,0,0,3,4,1,2,80,80,55,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-
     lines = [header]
-
-    for index, scene in enumerate(scenes):
-        start = timeline[index]["start"]
-        end = min(
-            timeline[index]["end"],
-            start + 2.2,
-        )
-
-        lines.append(
-            "Dialogue: 1,{},{},Heading,,0,0,0,,{}\n".format(
-                ass_time(start),
-                ass_time(end),
-                escape_ass_text(
-                    scene["heading"]
-                ),
-            )
-        )
-
+    for i, scene in enumerate(scenes):
+        start = timeline[i]["start"]
+        lines.append("Dialogue: 1,{},{},Heading,,0,0,0,,{{\\fad(140,180)}}{}\n".format(ass_time(start), ass_time(min(timeline[i]["end"], start + 2.4)), ass_escape(scene["heading"])))
+    emphasis = re.compile(r"(\d+(?:\.\d+)?(?:年|秒|分|倍|個|種類|％|%|歳)?|重要|結論|理由|ポイント|実は|つまり)")
     for event in events:
-        text = escape_ass_text(
-            event["text"]
-        )
-
-        if len(text) > 17:
-            center = len(text) // 2
-            text = (
-                text[:center]
-                + r"\N"
-                + text[center:]
-            )
-
-        lines.append(
-            "Dialogue: 0,{},{},Default,,0,0,0,,{}\n".format(
-                ass_time(event["start"]),
-                ass_time(event["end"]),
-                text,
-            )
-        )
-
-    output_path.write_text(
-        "".join(lines),
-        encoding="utf-8-sig",
-    )
+        source = event["text"]
+        style = "Emphasis" if emphasis.search(source) else "Default"
+        if len(source) > 17:
+            middle = len(source) // 2
+            pos = max(source.rfind(mark, 6, middle + 5) for mark in ("、", "。", " "))
+            pos = middle if pos < 6 else pos + 1
+            text = ass_escape(source[:pos].strip()) + r"\N" + ass_escape(source[pos:].strip())
+        else:
+            text = ass_escape(source)
+        lines.append("Dialogue: 0,{},{},{},,0,0,0,,{{\\fad(70,90)}}{}\n".format(ass_time(event["start"]), ass_time(event["end"]), style, text))
+    path.write_text("".join(lines), encoding="utf-8-sig")
 
 
 def create_narration(scenes):
-    for old_file in WORK.glob(
-        "voice_*.mp3"
-    ):
-        old_file.unlink(missing_ok=True)
-
-    async def generate_all():
-        for index, scene in enumerate(scenes):
-            log.info(
-                "音声生成 %d/%d",
-                index + 1,
-                len(scenes),
-            )
-
-            await synthesize_audio(
-                scene["narration"],
-                WORK / "voice_{:02d}.mp3".format(
-                    index
-                ),
-            )
-
-    asyncio.run(generate_all())
-
-    audio_paths = []
-    timeline = []
-    subtitle_events = []
-    cursor = 0.35
-
-    for index, scene in enumerate(scenes):
-        audio_path = (
-            WORK
-            / "voice_{:02d}.mp3".format(index)
-        )
-
-        scene_duration = probe_duration(
-            audio_path
-        )
-
-        start = cursor
-        end = start + scene_duration
-
-        timeline.append(
-            {
-                "scene": index,
-                "start": start,
-                "end": end,
-                "duration": scene_duration,
-            }
-        )
-
-        chunks = split_subtitles(
-            scene["narration"]
-        )
-
-        weights = [
-            max(1, len(chunk))
-            for chunk in chunks
-        ]
-
-        total_weight = sum(weights)
-        subtitle_cursor = start
-
-        for chunk_index, chunk in enumerate(chunks):
-            if chunk_index == len(chunks) - 1:
-                chunk_end = end
-            else:
-                chunk_duration = (
-                    scene_duration
-                    * weights[chunk_index]
-                    / total_weight
-                )
-
-                chunk_duration = max(
-                    1.5,
-                    min(3.8, chunk_duration),
-                )
-
-                chunk_end = min(
-                    end,
-                    subtitle_cursor
-                    + chunk_duration,
-                )
-
-            subtitle_events.append(
-                {
-                    "start": subtitle_cursor,
-                    "end": chunk_end,
-                    "text": chunk,
-                }
-            )
-
-            subtitle_cursor = chunk_end
-
-        cursor = end + 0.18
-        audio_paths.append(audio_path)
-
-    concat_path = WORK / "audio_concat.txt"
-
-    concat_path.write_text(
-        "".join(
-            "file '{}'\n".format(
-                path.resolve()
-            )
-            for path in audio_paths
-        ),
-        encoding="utf-8",
-    )
-
-    narration_path = WORK / "narration.m4a"
-
-    run_command(
-        [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_path),
-            "-c:a", "aac",
-            "-b:a", "160k",
-            str(narration_path),
-        ]
-    )
-
-    subtitle_path = WORK / "subtitles.ass"
-
-    create_ass(
-        subtitle_events,
-        scenes,
-        timeline,
-        subtitle_path,
-    )
-
-    return (
-        narration_path,
-        timeline,
-        probe_duration(narration_path),
-        subtitle_path,
-    )
+    for path in WORK.glob("voice_*.mp3"):
+        path.unlink(missing_ok=True)
+    async def create_all():
+        for i, scene in enumerate(scenes):
+            log.info("音声生成 %d/%d", i + 1, len(scenes))
+            await synthesize(scene["narration"], WORK / "voice_{:02d}.mp3".format(i))
+    asyncio.run(create_all())
+    paths, timeline, events, cursor = 0.0, [], [], 0.0
+    for i, scene in enumerate(scenes):
+        path = WORK / "voice_{:02d}.mp3".format(i)
+        sec = duration(path)
+        start, end = cursor, cursor + sec
+        chunks = subtitle_chunks(scene["narration"])
+        total = sum(max(1, len(x)) for x in chunks)
+        sub_cursor = start
+        scene_events = []
+        for n, chunk in enumerate(chunks):
+            chunk_end = end if n == len(chunks) - 1 else min(end, sub_cursor + max(1.2, min(3.4, sec * max(1, len(chunk)) / total)))
+            event = {"scene_index": i, "chunk_index": n, "start": sub_cursor, "end": chunk_end, "text": chunk}
+            events.append(event)
+            scene_events.append(event)
+            sub_cursor = chunk_end
+        timeline.append({"scene_index": i, "start": start, "end": end, "duration": sec, "events": scene_events})
+        cursor, paths = end, paths + [path]
+    listing = WORK / "audio.txt"
+    listing.write_text("".join("file '{}'\n".format(str(p.resolve()).replace("'", "'\\''")) for p in paths), encoding="utf-8")
+    output = WORK / "narration.m4a"
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listing), "-c:a", "aac", "-b:a", "160k", "-ar", "48000", str(output)])
+    subtitles = WORK / "subtitles.ass"
+    make_ass(events, scenes, timeline, subtitles)
+    return output, timeline, duration(output), subtitles
 
 
-def search_pixabay(query):
-    normalized = clean_text(
-        query
-    ).lower()[:100]
-
+def pixabay_search(query, media_type):
+    normalized = clean(query).lower()[:100]
+    key = media_type + ":" + normalized
     if not normalized:
         return []
-
-    if normalized in PIXABAY_CACHE:
-        return PIXABAY_CACHE[normalized]
-
+    if key in CACHE:
+        return CACHE[key]
     try:
-        response = requests.get(
-            "https://pixabay.com/api/videos/",
-            params={
-                "key": PIXABAY_API_KEY,
-                "q": normalized,
-                "lang": "en",
-                "video_type": "film",
-                "min_width": 1280,
-                "min_height": 720,
-                "safesearch": "true",
-                "order": "popular",
-                "per_page": PIXABAY_RESULTS,
-            },
-            timeout=45,
-        )
-
+        url = "https://pixabay.com/api/videos/" if media_type == "video" else "https://pixabay.com/api/"
+        params = {"key": PIXABAY_KEY, "q": normalized, "lang": "en", "safesearch": "true", "order": "popular", "per_page": RESULTS, "min_width": 1280, "min_height": 720}
+        if media_type == "video":
+            params["video_type"] = "film"
+        else:
+            params.update({"image_type": "photo", "orientation": "horizontal"})
+        response = requests.get(url, params=params, timeout=45)
         response.raise_for_status()
-
-        results = response.json().get(
-            "hits",
-            [],
-        )
-
-        PIXABAY_CACHE[normalized] = results
-        return results
-
+        hits = response.json().get("hits", [])
+        CACHE[key] = hits if isinstance(hits, list) else []
     except Exception as error:
-        log.warning(
-            "Pixabay検索失敗: %s",
-            error,
-        )
-        return []
+        log.warning("Pixabay%s検索失敗 [%s]: %s", media_type, normalized, error)
+        CACHE[key] = []
+    return CACHE[key]
 
 
-def choose_video_file(video_data):
-    candidates = []
-
-    for quality, penalty in (
-        ("medium", 0),
-        ("large", 100),
-        ("small", 10000),
-        ("tiny", 20000),
-    ):
-        file_data = (
-            video_data
-            .get("videos", {})
-            .get(quality, {})
-        )
-
-        url = str(file_data.get("url", ""))
-        width = int(file_data.get("width", 0) or 0)
-        height = int(file_data.get("height", 0) or 0)
-
-        if (
-            url
-            and width > height
-            and width >= 640
-            and height >= 360
-        ):
-            score = (
-                abs(width / height - 16 / 9)
-                * 10000
-                + penalty
-                + (0 if width >= 1280 else 5000)
-            )
-
-            candidates.append(
-                (score, url)
-            )
-
-    if not candidates:
-        return None
-
-    candidates.sort(
-        key=lambda item: item[0]
-    )
-
-    return candidates[0][1]
+def relevance(query, item):
+    q = word_tokens(query)
+    words = word_tokens(str(item.get("tags", "")) + " " + str(item.get("pageURL", "")))
+    return len(q & words) / max(1, min(len(q), 5)) if q else 0.0
 
 
-def relevance_score(query, video_data):
-    query_words = search_tokens(query)
-
-    tag_words = search_tokens(
-        video_data.get("tags", "")
-    )
-
-    if not query_words:
-        return 0
-
-    return (
-        len(query_words & tag_words)
-        / max(1, min(len(query_words), 4))
-    )
+def select_video_url(item):
+    choices = []
+    for quality, penalty in (("large", 0), ("medium", 100), ("small", 10000), ("tiny", 20000)):
+        info = item.get("videos", {}).get(quality, {})
+        url = str(info.get("url", ""))
+        width, height = int(info.get("width", 0) or 0), int(info.get("height", 0) or 0)
+        if url and width > height and width >= 640 and height >= 360:
+            choices.append((abs(width / height - 16 / 9) * 10000 + penalty - min(width, 1920) / 100, url))
+    return sorted(choices)[0][1] if choices else None
 
 
-def download_video(
-    video_data,
-    query,
-    scene_index,
-    cut_index,
-):
-    video_id = int(
-        video_data.get("id", 0) or 0
-    )
-
-    page_url = str(
-        video_data.get("pageURL", "")
-    )
-
-    video_url = choose_video_file(
-        video_data
-    )
-
-    if not video_id or not video_url:
+def download_asset(item, query, media_type, scene_index, cut_index):
+    item_id = int(item.get("id", 0) or 0)
+    unique_id = (media_type, item_id)
+    page_url = str(item.get("pageURL", ""))
+    if media_type == "video":
+        url = select_video_url(item)
+        suffix = ".mp4"
+    else:
+        url = str(item.get("largeImageURL") or item.get("fullHDURL") or item.get("webformatURL") or "")
+        suffix = ".png" if ".png" in url.lower() else ".jpg"
+    if not item_id or not url or unique_id in USED_IDS or url in USED_URLS or (page_url and page_url in USED_PAGES) or relevance(query, item) <= 0:
         return None, None
-
-    if (
-        video_id in USED_VIDEO_IDS
-        or video_url in USED_VIDEO_URLS
-        or page_url in USED_PAGE_URLS
-    ):
-        return None, None
-
-    score = relevance_score(
-        query,
-        video_data,
-    )
-
-    if score <= 0:
-        return None, None
-
-    output_path = (
-        WORK
-        / "pixabay_{:02d}_{:03d}.mp4".format(
-            scene_index,
-            cut_index,
-        )
-    )
-
+    path = WORK / "pixabay_{}_{:02d}_{:03d}{}".format(media_type, scene_index, cut_index, suffix)
     try:
-        response = requests.get(
-            video_url,
-            stream=True,
-            timeout=120,
-        )
-
+        response = requests.get(url, stream=media_type == "video", timeout=120)
         response.raise_for_status()
-
-        with output_path.open("wb") as output:
-            for chunk in response.iter_content(
-                1024 * 1024
-            ):
-                if chunk:
-                    output.write(chunk)
-
-        if (
-            output_path.stat().st_size < 100000
-            or probe_duration(output_path)
-            < MIN_CUT_SECONDS
-        ):
-            output_path.unlink(
-                missing_ok=True
-            )
-            return None, None
-
-        USED_VIDEO_IDS.add(video_id)
-        USED_VIDEO_URLS.add(video_url)
-
+        if media_type == "video":
+            with path.open("wb") as out:
+                for chunk in response.iter_content(1024 * 1024):
+                    if chunk:
+                        out.write(chunk)
+            if path.stat().st_size < 100000 or duration(path) < MIN_CUT:
+                path.unlink(missing_ok=True)
+                return None, None
+        else:
+            path.write_bytes(response.content)
+            if path.stat().st_size < 50000:
+                path.unlink(missing_ok=True)
+                return None, None
+            with Image.open(path) as image:
+                image.verify()
+        USED_IDS.add(unique_id)
+        USED_URLS.add(url)
         if page_url:
-            USED_PAGE_URLS.add(page_url)
-
-        credit = {
-            "video_id": video_id,
-            "page_url": page_url,
-            "creator_name": str(
-                video_data.get("user", "")
-            ),
-            "query": query,
-        }
-
-        return output_path, credit
-
+            USED_PAGES.add(page_url)
+        return path, {"media_type": media_type, "id": item_id, "page_url": page_url, "creator_name": str(item.get("user", "")), "query": query}
     except Exception as error:
-        log.warning(
-            "Pixabay動画取得失敗: %s",
-            error,
-        )
-
-        output_path.unlink(
-            missing_ok=True
-        )
-
+        log.warning("%s取得失敗 [%s]: %s", media_type, query, error)
+        path.unlink(missing_ok=True)
         return None, None
 
 
-def acquire_visual_assets(
-    scenes,
-    timeline,
-):
-    all_assets = []
-    credits = []
+def expand_specs(scene, count):
+    cuts = scene.get("visual_cuts", []) or [{"narration_excerpt": scene["narration"][:90], "query": scene["heading"], "fallback_query": scene["heading"], "card_title": scene["heading"], "card_points": []}]
+    suffixes = ("", " close up", " wide shot", " natural environment", " detailed view", " slow motion")
+    specs = []
+    for i in range(count):
+        spec = dict(cuts[i % len(cuts)])
+        cycle = i // len(cuts)
+        if cycle:
+            spec["query"] = (clean(spec.get("query", "")) + suffixes[cycle % len(suffixes)])[:100]
+        specs.append(spec)
+    return specs
 
-    for scene_index, scene in enumerate(scenes):
-        desired_count = max(
-            len(scene["visual_cuts"]),
-            math.ceil(
-                timeline[scene_index]["duration"]
-                / MAX_CUT_SECONDS
-            ),
-        )
 
-        specifications = list(
-            scene["visual_cuts"]
-        )
-
-        while len(specifications) < desired_count:
-            index = (
-                len(specifications)
-                % len(scene["visual_cuts"])
-            )
-
-            specifications.append(
-                scene["visual_cuts"][index].copy()
-            )
-
-        scene_assets = []
-
-        for cut_index, specification in enumerate(
-            specifications
-        ):
-            selected = None
-
-            for query in (
-                pecification["query"],
-                specification["fallback_query"],
-            ):
-                results = sorted(
-                    search_pixabay(query),
-                    key=lambda video: relevance_score(
-                        query,
-                        video,
-                    ),
-                    reverse=True,
-                )
-
-                for video in results:
-                    path, credit = download_video(
-                        video,
-                        query,
-                        scene_index,
-                        cut_index,
-                    )
-
-                    if path:
-                        selected = {
-                            "type": "video",
-                            "path": path,
-                            "specification": specification,
-                        }
-
-                        credits.append(credit)
+def acquire_assets(scenes, timeline):
+    all_assets, credits = [], []
+    for si, scene in enumerate(scenes):
+        count = max(len(scene["visual_cuts"]), math.ceil(timeline[si]["duration"] / MAX_CUT))
+        selected = []
+        for ci, spec in enumerate(expand_specs(scene, count)):
+            queries = []
+            for q in (spec.get("query", ""), spec.get("fallback_query", "")):
+                q = clean(q)
+                if q and q not in queries:
+                    queries.append(q)
+            asset = None
+            for media_type in ("video", "image"):
+                for query in queries:
+                    results = sorted(pixabay_search(query, media_type), key=lambda x: relevance(query, x), reverse=True)
+                    for item in results:
+                        path, credit = download_asset(item, query, media_type, si, ci)
+                        if path:
+                            asset = {"type": media_type, "path": path, "spec": spec}
+                            credits.append(credit)
+                            break
+                    if asset:
                         break
-
-                if selected:
+                if asset:
                     break
-
-            if selected:
-                scene_assets.append(selected)
-            else:
-                scene_assets.append(
-                    {
-                        "type": "card",
-                        "path": None,
-                        "specification": specification,
-                    }
-                )
-
-        all_assets.append(
-            scene_assets[:desired_count]
-        )
-
-        log.info(
-            "シーン%d: 動画%d本",
-            scene_index + 1,
-            sum(
-                asset["type"] == "video"
-                for asset in scene_assets
-            ),
-        )
-
-    (WORK / "pixabay_credits.json").write_text(
-        json.dumps(
-            credits,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
+            selected.append(asset or {"type": "card", "path": None, "spec": spec})
+        all_assets.append(selected)
+        log.info("シーン%d: 動画%d 画像%d カード%d", si + 1, sum(x["type"] == "video" for x in selected), sum(x["type"] == "image" for x in selected), sum(x["type"] == "card" for x in selected))
+    (WORK / "pixabay_credits.json").write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding="utf-8")
     return all_assets, credits
 
 
-def wrap_japanese(text, width):
-    value = clean_text(text)
-
-    return "\n".join(
-        value[index:index + width]
-        for index in range(
-            0,
-            len(value),
-            width,
-        )
-    )
-
-
-def create_information_card(
-    scene,
-    specification,
-    card_index,
-):
-    output_path = (
-        WORK
-        / "card_{:03d}.jpg".format(
-            card_index
-        )
-    )
-
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        (18, 27, 47),
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    title_font = ImageFont.truetype(
-        get_font_path(),
-        54,
-    )
-
-    point_font = ImageFont.truetype(
-        get_font_path(),
-        34,
-    )
-
-    draw.rounded_rectangle(
-        (55, 48, 1225, 672),
-        radius=30,
-        fill=(25, 38, 66),
-        outline=(97, 177, 255),
-        width=3,
-    )
-
-    title = (
-        specification.get("card_title")
-        or scene["heading"]
-    )
-
-    draw.multiline_text(
-        (85, 120),
-        wrap_japanese(title, 18),
-        font=title_font,
-        fill=(255, 228, 92),
-        stroke_width=2,
-        stroke_fill="black",
-        spacing=12,
-    )
-
-    points = specification.get(
-        "card_points",
-        [],
-    )
-
-    if not points:
-        points = [
-            specification.get(
-                "narration_excerpt"
-            )
-            or scene["narration"][:70]
-        ]
-
-    y_position = 310
-
-    for point_index, point in enumerate(points):
-        if point_index >= 3:
+def fit_font(draw, text, max_size, min_size, max_width, max_height, spacing=10):
+    selected = ImageFont.truetype(font_path(), min_size)
+    for size in range(max_size, min_size - 1, -2):
+        candidate = ImageFont.truetype(font_path(), size)
+        box = draw.multiline_textbbox((0, 0), text, font=candidate, spacing=spacing)
+        selected = candidate
+        if box[2] - box[0] <= max_width and box[3] - box[1] <= max_height:
             break
-
-        draw.ellipse(
-            (
-                92,
-                y_position + 8,
-                108,
-                y_position + 24,
-            ),
-            fill=(97, 177, 255),
-        )
-
-        draw.multiline_text(
-            (130, y_position),
-            wrap_japanese(point, 26),
-            font=point_font,
-            fill="white",
-            spacing=10,
-        )
-
-        y_position += 105
-
-    image.save(
-        output_path,
-        quality=94,
-    )
-
-    return output_path
+    return selected
 
 
-def create_image_clip(
-    image_path,
-    output_path,
-    clip_duration,
-):
-    frame_count = max(
-        1,
-        int(clip_duration * FPS),
-    )
-
-    fade_out = max(
-        0,
-        clip_duration - 0.22,
-    )
-
-    video_filter = (
-        "scale=1600:900:"
-        "force_original_aspect_ratio=increase,"
-        "crop=1600:900,"
-        "zoompan="
-        "z='min(zoom+0.0005,1.10)':"
-        "d={}:s=1280x720:fps=30,"
-        "fade=t=in:st=0:d=0.22,"
-        "fade=t=out:st={:.3f}:d=0.22,"
-        "format=yuv420p"
-    ).format(
-        frame_count,
-        fade_out,
-    )
-
-    run_command(
-        [
-            "ffmpeg", "-y",
-            "-loop", "1",
-            "-i", str(image_path),
-            "-an",
-            "-vf", video_filter,
-            "-t", "{:.3f}".format(
-                clip_duration
-            ),
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "22",
-            "-pix_fmt", "yuv420p",
-            "-r", "30",
-            str(output_path),
-        ]
-    )
-
-
-def create_video_clip(
-    source_path,
-    output_path,
-    clip_duration,
-    cut_index,
-):
-    source_duration = probe_duration(
-        source_path
-    )
-
-    maximum_start = max(
-        0.0,
-        source_duration
-        - clip_duration
-        - 0.1,
-    )
-
-    position_factor = (
-        (cut_index * 37) % 100
-    ) / 100.0
-
-    source_start = (
-        maximum_start
-        * (0.25 + 0.5 * position_factor)
-    )
-
-    fade_out = max(
-        0,
-        clip_duration - 0.18,
-    )
-
-    video_filter = (
-        "scale=1280:720:"
-        "force_original_aspect_ratio=increase,"
-        "crop=1280:720,"
-        "fps=30,"
-        "fade=t=in:st=0:d=0.18,"
-        "fade=t=out:st={:.3f}:d=0.18,"
-        "format=yuv420p"
-    ).format(fade_out)
-
-    run_command(
-        [
-            "ffmpeg", "-y",
-            "-ss", "{:.3f}".format(
-                source_start
-            ),
-            "-i", str(source_path),
-            "-an",
-            "-t", "{:.3f}".format(
-                clip_duration
-            ),
-            "-vf", video_filter,
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "22",
-            "-pix_fmt", "yuv420p",
-            "-r", "30",
-            str(output_path),
-        ]
-    )
-
-
-def build_final_video(
-    scenes,
-    timeline,
-    assets,
-    narration,
-    subtitles,
-):
-    clip_paths = []
-    card_index = 0
-
-    for scene_index, scene in enumerate(scenes):
-        scene_duration = (
-            timeline[scene_index]["duration"]
-        )
-
-        count = max(
-            len(assets[scene_index]),
-            math.ceil(
-                scene_duration
-                / MAX_CUT_SECONDS
-            ),
-        )
-
-        clip_duration = (
-            scene_duration / count
-        )
-
-        for cut_index in range(count):
-            output_path = (
-                WORK
-                / "clip_{:02d}_{:03d}.mp4".format(
-                    scene_index,
-                    cut_index,
-                )
-            )
-
-            if cut_index < len(
-                assets[scene_index]
-            ):
-                asset = assets[scene_index][
-                    cut_index
-                ]
-            else:
-                specification = (
-                    scene["visual_cuts"][
-                        cut_index
-                        % len(scene["visual_cuts"])
-                    ]
-                )
-
-                asset = {
-                    "type": "card",
-                    "specification": specification,
-                }
-
-            if asset["type"] == "video":
-                source_duration = probe_duration(
-                    asset["path"]
-                )
-
-                if source_duration >= clip_duration:
-                    create_video_clip(
-                        asset["path"],
-                        output_path,
-                        clip_duration,
-                        cut_index,
-                    )
-                else:
-                    card = create_information_card(
-                        scene,
-                        asset["specification"],
-                        card_index,
-                    )
-
-                    card_index += 1
-
-                    create_image_clip(
-                        card,
-                        output_path,
-                        clip_duration,
-                    )
-            else:
-                card = create_information_card(
-                    scene,
-                    asset["specification"],
-                    card_index,
-                )
-
-                card_index += 1
-
-                create_image_clip(
-                    card,
-                    output_path,
-                    clip_duration,
-                )
-
-            clip_paths.append(output_path)
-
-    concat_path = WORK / "video_concat.txt"
-
-    concat_path.write_text(
-        "".join(
-            "file '{}'\n".format(
-                path.resolve()
-            )
-            for path in clip_paths
-        ),
-        encoding="utf-8",
-    )
-
-    video_only = WORK / "video_only.mp4"
-
-    run_command(
-        [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_path),
-            "-c:v", "copy",
-            str(video_only),
-        ]
-    )
-
-    raw_video = WORK / "raw_video.mp4"
-
-    run_command(
-        [
-            "ffmpeg", "-y",
-            "-i", str(video_only),
-            "-i", str(narration),
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "160k",
-            "-shortest",
-            str(raw_video),
-        ]
-    )
-
-    mixed_video = WORK / "mixed_video.mp4"
-
-    if BGM_PATH.exists():
-        narration_duration = probe_duration(
-            narration
-        )
-
-        audio_filter = (
-            "[1:a]volume=0.055,"
-            "atrim=0:{:.3f}[bg];"
-            "[0:a][bg]amix="
-            "inputs=2:"
-            "duration=first[mixed]"
-        ).format(narration_duration)
-
-        run_command(
-            [
-                "ffmpeg", "-y",
-                "-i", str(raw_video),
-                "-stream_loop", "-1",
-                "-i", str(BGM_PATH),
-                "-filter_complex", audio_filter,
-                "-map", "0:v",
-                "-map", "[mixed]",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-shortest",
-                str(mixed_video),
-            ]
-        )
-    else:
-        shutil.copy2(
-            raw_video,
-            mixed_video,
-        )
-
-    final_video = WORK / "final.mp4"
-
-    escaped_subtitles = str(
-        subtitles.resolve()
-    ).replace("\\", "/").replace(
-        ":",
-        r"\:",
-    )
-
-    run_command(
-        [
-            "ffmpeg", "-y",
-            "-i", str(mixed_video),
-            "-vf",
-            "ass='{}'".format(
-                escaped_subtitles
-            ),
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "22",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            str(final_video),
-        ]
-    )
-
-    return final_video
-
-
-def create_thumbnail(title, scene):
-    specification = (
-        scene["visual_cuts"][0]
-    )
-
-    source = create_information_card(
-        scene,
-        specification,
-        999,
-    )
-
-    output_path = WORK / "thumbnail.jpg"
-
-    image = Image.open(
-        source
-    ).convert("RGB")
-
-    image = ImageEnhance.Brightness(
-        image
-    ).enhance(0.7)
-
+def create_card(scene, spec, index):
+    path = WORK / "card_{:03d}.jpg".format(index)
+    image = Image.new("RGB", (W, H), (13, 22, 39))
     draw = ImageDraw.Draw(image)
+    for y in range(H):
+        ratio = y / (H - 1)
+        draw.line((0, y, W, y), fill=(int(13 + 13 * ratio), int(22 + 20 * ratio), int(39 + 35 * ratio)))
+    draw.rounded_rectangle((42, 38, 1238, 682), radius=28, fill=(20, 31, 53), outline=(79, 163, 230), width=3)
+    draw.rounded_rectangle((75, 78, 1205, 225), radius=22, fill=(29, 46, 76))
+    title = wrap(clean(spec.get("card_title", "")) or scene["heading"], 17)
+    title_font = fit_font(draw, title, 54, 38, 1040, 125, 8)
+    box = draw.multiline_textbbox((0, 0), title, font=title_font, spacing=8, align="center", stroke_width=2)
+    draw.multiline_text(((W - (box[2] - box[0])) / 2, 151 - (box[3] - box[1]) / 2), title, font=title_font, fill=(255, 228, 92), stroke_width=2, stroke_fill="black", spacing=8, align="center")
+    points = spec.get("card_points", []) if isinstance(spec.get("card_points", []), list) else []
+    points = [clean(x) for x in points if clean(x)][:3] or [clean(spec.get("narration_excerpt", "")) or scene["narration"][:90]]
+    height = 330 // len(points)
+    for i, point in enumerate(points):
+        y = 285 + i * height
+        draw.ellipse((86, y + 13, 106, y + 33), fill=(79, 177, 255))
+        text = wrap(point, 27)
+        draw.multiline_text((132, y), text, font=fit_font(draw, text, 34, 26, 1000, height - 15, 8), fill=(245, 248, 255), spacing=8)
+    image.save(path, quality=94, optimize=True)
+    return path
 
-    title_font = ImageFont.truetype(
-        get_font_path(),
-        68,
-    )
 
-    title_text = wrap_japanese(
-        title,
-        14,
-    )
+def image_clip(source, output, seconds, index):
+    frames = max(1, int(seconds * FPS))
+    modes = [
+        ("min(zoom+0.00045,1.10)", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),
+        ("min(zoom+0.00035,1.08)", "min(iw-iw/zoom,(on/{})*(iw-iw/zoom))".format(frames), "ih/2-(ih/zoom/2)"),
+        ("1.08", "max(0,(1-on/{})*(iw-iw/zoom))".format(frames), "ih/2-(ih/zoom/2)"),
+        ("min(zoom+0.0004,1.09)", "iw/2-(iw/zoom/2)", "min(ih-ih/zoom,(on/{})*(ih-ih/zoom))".format(frames)),
+    ]
+    z, x, y = modes[index % len(modes)]
+    vf = "scale=1600:900:force_original_aspect_ratio=increase,crop=1600:900,zoompan=z='{}':x='{}':y='{}':d={}:s=1280x720:fps=30,eq=contrast=1.03:saturation=1.04,format=yuv420p".format(z, x, y, frames)
+    run(["ffmpeg", "-y", "-loop", "1", "-i", str(source), "-an", "-vf", vf, "-t", "{:.3f}".format(seconds), "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-r", str(FPS), str(output)])
 
-    text_box = draw.multiline_textbbox(
-        (0, 0),
-        title_text,
-        font=title_font,
-        spacing=14,
-        align="center",
-        stroke_width=6,
-    )
 
-    x_position = (
-        WIDTH
-        - (text_box[2] - text_box[0])
-    ) / 2
+def video_clip(source, output, seconds, index):
+    source_sec = duration(source)
+    start = max(0.0, source_sec - seconds - 0.1) * (0.15 + 0.7 * (((index * 37) % 100) / 100))
+    vf = "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=30,eq=contrast=1.025:saturation=1.04,format=yuv420p"
+    run(["ffmpeg", "-y", "-ss", "{:.3f}".format(start), "-i", str(source), "-an", "-t", "{:.3f}".format(seconds), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-r", str(FPS), str(output)])
 
-    y_position = (
-        HEIGHT
-        - (text_box[3] - text_box[1])
-    ) / 2
 
-    draw.multiline_text(
-        (x_position, y_position),
-        title_text,
-        font=title_font,
-        fill="#FFE45C",
-        stroke_width=7,
-        stroke_fill="black",
-        spacing=14,
-        align="center",
-    )
+def cut_durations(total, count):
+    pattern = (-0.65, 0.35, -0.25, 0.55, 0.0)
+    values = [max(2.8, min(7.2, total / count + pattern[i % len(pattern)])) for i in range(count)]
+    scale = total / sum(values)
+    values = [x * scale for x in values]
+    values[-1] += total - sum(values)
+    return values
 
-    image.save(
-        output_path,
-        quality=95,
-    )
 
-    return output_path
+def create_final(scenes, timeline, all_assets, narr, subtitles):
+    for pattern in ("clip_*.mp4", "card_*.jpg", "visual.mp4", "raw.mp4", "mixed.mp4", "final.mp4", "video.txt"):
+        for path in WORK.glob(pattern):
+            path.unlink(missing_ok=True)
+    clips, card_no, global_no = [], 0, 0
+    for si, scene in enumerate(scenes):
+        assets = list(all_assets[si]) or [{"type": "card", "path": None, "spec": scene["visual_cuts"][0]}]
+        while len(assets) < math.ceil(timeline[si]["duration"] / MAX_CUT):
+            assets.append({"type": "card", "path": None, "spec": scene["visual_cuts"][len(assets) % len(scene["visual_cuts"])]})
+        seconds_list = cut_durations(timeline[si]["duration"], len(assets))
+        for ci, asset in enumerate(assets):
+            output = WORK / "clip_{:02d}_{:03d}.mp4".format(si, ci)
+            seconds = seconds_list[ci]
+            try:
+                if asset["type"] == "video" and asset.get("path") and duration(asset["path"]) >= seconds:
+                    video_clip(asset["path"], output, seconds, global_no)
+                elif asset["type"] == "image" and asset.get("path"):
+                    image_clip(asset["path"], output, seconds, global_no)
+                else:
+                    image_clip(create_card(scene, asset["spec"], card_no), output, seconds, global_no)
+                    card_no += 1
+            except Exception as error:
+                log.warning("カット生成失敗。カードへ切替: %s", error)
+                image_clip(create_card(scene, asset["spec"], card_no), output, seconds, global_no)
+                card_no += 1
+            clips.append(output)
+            global_no += 1
+    listing = WORK / "video.txt"
+    listing.write_text("".join("file '{}'\n".format(str(p.resolve()).replace("'", "'\\''")) for p in clips), encoding="utf-8")
+    visual, raw, mixed, final = WORK / "visual.mp4", WORK / "raw.mp4", WORK / "mixed.mp4", WORK / "final.mp4"
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listing), "-an", "-c:v", "copy", str(visual)])
+    run(["ffmpeg", "-y", "-i", str(visual), "-i", str(narr), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(raw)])
+    if BGM.exists():
+        filt = "[1:a]volume=0.05,atrim=0:{:.3f}[music];[0:a][music]amix=inputs=2:duration=first:dropout_transition=2,alimiter=limit=0.95[audio]".format(duration(narr))
+        run(["ffmpeg", "-y", "-i", str(raw), "-stream_loop", "-1", "-i", str(BGM), "-filter_complex", filt, "-map", "0:v:0", "-map", "[audio]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(mixed)])
+    else:
+        shutil.copy2(raw, mixed)
+    sub = str(subtitles.resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
+    run(["ffmpeg", "-y", "-i", str(mixed), "-vf", "ass='{}'".format(sub), "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(final)])
+    return final
+
+
+def create_thumbnail(title, scene, assets):
+    source = next((a.get("path") for a in assets[0] if a.get("type") == "image" and a.get("path")), None) if assets else None
+    image = Image.new("RGB", (W, H), (15, 23, 38))
+    if source and Path(source).exists():
+        with Image.open(source) as src:
+            src = src.convert("RGB")
+            ratio = max(W / src.width, H / src.height)
+            src = src.resize((int(src.width * ratio), int(src.height * ratio)), Image.Resampling.LANCZOS)
+            image.paste(src.crop(((src.width - W) // 2, (src.height - H) // 2, (src.width + W) // 2, (src.height + H) // 2)))
+    image = ImageEnhance.Brightness(image).enhance(0.55)
+    draw = ImageDraw.Draw(image)
+    text = wrap(clean(title) or scene["heading"], 11)
+    title_font = fit_font(draw, text, 76, 52, 1080, 430, 12)
+    draw.multiline_text((65, 150), text, font=title_font, fill=(255, 231, 76), stroke_width=8, stroke_fill="black", spacing=12)
+    output = WORK / "thumbnail.jpg"
+    image.save(output, quality=95, optimize=True)
+    return output
 
 
 def add_credits(description, credits):
     if not credits:
         return description
-
-    lines = [
-        "",
-        "",
-        "映像素材: Videos provided by Pixabay",
-        "https://pixabay.com/",
-    ]
-
+    lines, seen = ["", "", "素材提供: Pixabay", "https://pixabay.com/"], set()
     for credit in credits:
-        if credit.get("creator_name"):
-            lines.append(
-                "Video by {} on Pixabay".format(
-                    credit["creator_name"]
-                )
-            )
-
+        key = (credit["media_type"], credit["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if clean(credit.get("creator_name", "")):
+            lines.append("{} by {} on Pixabay".format(credit["media_type"].title(), clean(credit["creator_name"])))
         if credit.get("page_url"):
-            lines.append(
-                credit["page_url"]
-            )
-
-    return description + "\n".join(lines)
+            lines.append(credit["page_url"])
+    return str(description or "").rstrip() + "\n".join(lines)
 
 
-def get_youtube_credentials():
-    credentials = (
-        Credentials
-        .from_authorized_user_info(
-            get_json_secret("TOKEN_JSON")
-        )
-    )
-
-    if (
-        credentials.expired
-        and credentials.refresh_token
-    ):
-        credentials.refresh(Request())
-
-    return credentials
+def youtube_credentials():
+    value = Credentials.from_authorized_user_info(secret("TOKEN_JSON"))
+    if value.expired and value.refresh_token:
+        value.refresh(Request())
+    return value
 
 
-def upload_to_youtube(
-    video_path,
-    thumbnail_path,
-    script_data,
-):
-    if DRY_RUN or not UPLOAD_TO_YOUTUBE:
-        log.info(
-            "YouTube投稿をスキップします。"
-        )
+def upload_video(video, thumbnail, data):
+    if DRY or not UPLOAD:
+        log.info("YouTube投稿をスキップします。")
         return None
-
-    video_duration = probe_duration(
-        video_path
-    )
-
-    if not (
-        MIN_SECONDS
-        <= video_duration
-        <= MAX_SECONDS
-    ):
-        raise RuntimeError(
-            "8〜10分外のため投稿中止: {:.1f}秒".format(
-                video_duration
-            )
-        )
-
-    youtube = build(
-        "youtube",
-        "v3",
-        credentials=get_youtube_credentials(),
-        cache_discovery=False,
-    )
-
+    if not MIN_SEC <= duration(video) <= MAX_SEC:
+        raise RuntimeError("8〜10分外のため投稿中止")
+    youtube = build("youtube", "v3", credentials=youtube_credentials(), cache_discovery=False)
     body = {
-        "snippet": {
-            "title": str(
-                script_data.get(
-                    "title",
-                    "自動生成動画",
-                )
-            )[:100],
-            "description": str(
-                script_data.get(
-                    "description",
-                    "",
-                )
-            )[:5000],
-            "tags": script_data.get(
-                "tags",
-                [],
-            )[:20],
-            "categoryId": "27",
-            "defaultLanguage": "ja",
-        },
-        "status": {
-            "privacyStatus": PRIVACY_STATUS,
-            "selfDeclaredMadeForKids": False,
-            "containsSyntheticMedia": True,
-        },
+        "snippet": {"title": str(data.get("title", "自動生成動画"))[:100], "description": str(data.get("description", ""))[:5000], "tags": data.get("tags", [])[:20], "categoryId": "27", "defaultLanguage": "ja"},
+        "status": {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True},
     }
-
-    request = youtube.videos().insert(
-        part="snippet,status",
-        body=body,
-        media_body=MediaFileUpload(
-            str(video_path),
-            mimetype="video/mp4",
-            chunksize=8 * 1024 * 1024,
-            resumable=True,
-        ),
-        notifySubscribers=False,
-    )
-
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=MediaFileUpload(str(video), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True), notifySubscribers=False)
     response = None
-
     while response is None:
         status, response = request.next_chunk()
-
         if status:
-            log.info(
-                "アップロード %d%%",
-                int(status.progress() * 100),
-            )
-
+            log.info("アップロード %d%%", int(status.progress() * 100))
     video_id = str(response["id"])
-
     try:
-        youtube.thumbnails().set(
-            videoId=video_id,
-            media_body=MediaFileUpload(
-                str(thumbnail_path),
-                mimetype="image/jpeg",
-            ),
-        ).execute()
-
+        youtube.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(str(thumbnail), mimetype="image/jpeg")).execute()
     except Exception as error:
-        log.warning(
-            "サムネイル設定失敗: %s",
-            error,
-        )
-
+        log.warning("サムネイル設定失敗: %s", error)
     return video_id
 
 
+def validate_environment():
+    for command in ("ffmpeg", "ffprobe"):
+        if not shutil.which(command):
+            raise RuntimeError(command + "がありません。")
+    font_path()
+    if not PIXABAY_KEY:
+        raise RuntimeError("PIXABAY_API_KEYが未設定です。")
+    if not os.getenv("GROQ_API_KEY", "").strip():
+        raise RuntimeError("GROQ_API_KEYが未設定です。")
+
+
 def main():
-    check_runtime()
-
-    theme = os.getenv(
-        "INPUT_VIDEO_TITLE",
-        "",
-    ).strip()
-
-    genre = os.getenv(
-        "INPUT_VIDEO_GENRE",
-        "自動判定",
-    ).strip()
-
-    tone = os.getenv(
-        "INPUT_VIDEO_TONE",
-        "わかりやすく、最後まで見たくなる雰囲気",
-    ).strip()
-
+    validate_environment()
+    theme = os.getenv("INPUT_VIDEO_TITLE", "").strip()
+    genre = os.getenv("INPUT_VIDEO_GENRE", "自動判定").strip()
+    tone = os.getenv("INPUT_VIDEO_TONE", "わかりやすく、最後まで見たくなる雰囲気").strip()
     if not theme:
-        raise RuntimeError(
-            "INPUT_VIDEO_TITLEが空です。"
-        )
-
+        raise RuntimeError("INPUT_VIDEO_TITLEが空です。")
     log.info("=" * 60)
-    log.info("高品質動画生成を開始します。")
+    log.info("PIPELINE_VERSION: %s", VERSION)
     log.info("テーマ: %s", theme)
-    log.info("DRY_RUN: %s", DRY_RUN)
+    log.info("DRY_RUN: %s", DRY)
     log.info("=" * 60)
-
-    llm = LLMClient()
-    sources = research_theme(theme)
-
-    script_data = create_script(
-        llm,
-        theme,
-        genre,
-        tone,
-        sources,
-    )
-
-    narration = None
-    timeline = None
-    narration_duration = 0
-    subtitles = None
-
+    
+    # LLMのインスタンス化をループ外で行う
+    llm = LLM()
+    data = create_script(llm, theme, genre, tone, research(theme))
+    
     for attempt in range(3):
-        (
-            narration,
-            timeline,
-            narration_duration,
-            subtitles,
-        ) = create_narration(
-            script_data["scenes"]
-        )
-
-        log.info(
-            "実測時間: %.1f秒",
-            narration_duration,
-        )
-
-        if (
-            MIN_SECONDS
-            <= narration_duration
-            <= MAX_SECONDS
-        ):
+        narr, timeline, seconds, subtitles = create_narration(data["scenes"])
+        log.info("音声実測時間: %.1f秒", seconds)
+        if MIN_SEC <= seconds <= MAX_SEC:
             break
-
         if attempt < 2:
-            script_data = revise_script_duration(
-                llm,
-                script_data,
-                narration_duration,
-                theme,
-            )
-
-    if not (
-        MIN_SECONDS
-        <= narration_duration
-        <= MAX_SECONDS
-    ):
-        raise RuntimeError(
-            "8〜10分に調整できませんでした。"
-        )
-
-    (WORK / "script.json").write_text(
-        json.dumps(
-            script_data,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    assets, credits = acquire_visual_assets(
-        script_data["scenes"],
-        timeline,
-    )
-
-    script_data["description"] = add_credits(
-        script_data.get("description", ""),
-        credits,
-    )
-
-    final_video = build_final_video(
-        script_data["scenes"],
-        timeline,
-        assets,
-        narration,
-        subtitles,
-    )
-
-    final_duration = probe_duration(
-        final_video
-    )
-
-    if not (
-        MIN_SECONDS
-        <= final_duration
-        <= MAX_SECONDS
-    ):
-        raise RuntimeError(
-            "最終動画が8〜10分外です: {:.1f}秒".format(
-                final_duration
-            )
-        )
-
-    thumbnail = create_thumbnail(
-        script_data.get("title", theme),
-        script_data["scenes"][0],
-    )
-
-    video_id = upload_to_youtube(
-        final_video,
-        thumbnail,
-        script_data,
-    )
-
-    youtube_url = (
-        "https://youtu.be/{}".format(video_id)
-        if video_id
-        else ""
-    )
-
-    metadata = dict(script_data)
-
-    metadata.update(
-        {
-            "theme": theme,
-            "duration_seconds": final_duration,
-            "youtube_url": youtube_url,
-            "dry_run": DRY_RUN,
-            "unique_video_count": len(
-                USED_VIDEO_IDS
-            ),
-            "used_video_ids": sorted(
-                USED_VIDEO_IDS
-            ),
-            "pixabay_credits": credits,
-            "bgm_used": BGM_PATH.exists(),
-        }
-    )
-
-    (WORK / "metadata.json").write_text(
-        json.dumps(
-            metadata,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    log.info(
-        "処理完了: %s",
-        youtube_url or final_video,
-    )
+            # llmを渡して処理を行う
+            data = adjust_duration(llm, data, seconds, theme)
+            
+    if not MIN_SEC <= seconds <= MAX_SEC:
+        raise RuntimeError("8〜10分に調整できませんでした: {:.1f}秒".format(seconds))
+    (WORK / "script.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    assets, credits = acquire_assets(data["scenes"], timeline)
+    data["description"] = add_credits(data.get("description", ""), credits)
+    final = create_final(data["scenes"], timeline, assets, narr, subtitles)
+    final_seconds = duration(final)
+    if not MIN_SEC <= final_seconds <= MAX_SEC:
+        raise RuntimeError("最終動画が8〜10分外です: {:.1f}秒".format(final_seconds))
+    thumbnail = create_thumbnail(data.get("title", theme), data["scenes"][0], assets)
+    video_id = upload_video(final, thumbnail, data)
+    youtube_url = "https://youtu.be/" + video_id if video_id else ""
+    metadata = dict(data)
+    metadata.update({"pipeline_version": VERSION, "theme": theme, "duration_seconds": final_seconds, "youtube_url": youtube_url, "dry_run": DRY, "unique_media_count": len(USED_IDS), "used_media_ids": sorted("{}:{}".format(x[0], x[1]) for x in USED_IDS), "pixabay_credits": credits, "bgm_used": BGM.exists(), "groq_model": GROQ_MODEL})
+    (WORK / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    log.info("処理完了: %s", youtube_url or final)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("動画生成処理に失敗しました。")
+        raise
