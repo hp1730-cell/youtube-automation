@@ -769,7 +769,21 @@ def main():
     log.info("テーマ: %s", theme)
     log.info("DRY_RUN: %s", DRY)
     log.info("=" * 60)
-    data = create_script(LLM(), theme, genre, tone, research(theme))
+    
+    # 【修正】ここでインスタンスを変数 'llm' に格納する
+    llm = LLM()
+    
+    # 生成関数に 'llm' 変数を渡す
+    data = create_script(llm, theme, genre, tone, research(theme))
+    
+    for attempt in range(3):
+        narr, timeline, seconds, subtitles = create_narration(data["scenes"])
+        log.info("音声実測時間: %.1f秒", seconds)
+        if MIN_SEC <= seconds <= MAX_SEC:
+            break
+        if attempt < 2:
+            # こちらも 'llm' を渡す
+            data = adjust_duration(llm, data, seconds, theme)
     for attempt in range(3):
         narr, timeline, seconds, subtitles = create_narration(data["scenes"])
         log.info("音声実測時間: %.1f秒", seconds)
