@@ -348,17 +348,9 @@ def adjust_duration(llm, data, seconds, theme):
     return normalize(data, theme)
 
 def subtitle_chunks(text):
-    output = []
-    for sentence in re.split(r"(?<=[。！？!?])", clean(text)):
-        sentence = sentence.strip()
-        while len(sentence) > 24:
-            position = max(sentence.rfind(mark, 9, 25) for mark in ("、", "，", " "))
-            position = 24 if position < 9 else position + 1
-            output.append(sentence[:position].strip())
-            sentence = sentence[position:].strip()
-        if sentence:
-            output.append(sentence)
-    return output or [clean(text)]
+    # 句点（。！？!?）で区切られた「一文ごと」にテロップを切る
+    chunks = [s.strip() for s in re.split(r"(?<=[。！？!?])", clean(text)) if s.strip()]
+    return chunks or [clean(text)]
 
 
 async def synthesize(text, path):
