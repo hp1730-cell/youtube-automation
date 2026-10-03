@@ -319,26 +319,33 @@ def create_script(llm, theme, genre, tone, sources):
     return data
 
 
-def adjust_duration(data, seconds, theme):
+def adjust_duration(llm, data, seconds, theme):
     ratio = TARGET_SEC / max(seconds, 1)
     if seconds < MIN_SEC:
-        additions = ["ここで重要なのは、確認された事実と推測を分けて理解することです。", "この背景を知ると、特徴が生まれる理由をより具体的に捉えられます。", "ただし個体差や環境差があり、すべてに同じように当てはまるとは限りません。"]
+        log.info("動画時間が不足しています(%.1f秒)。LLMでナレーションを加筆します。", seconds)
         for i, scene in enumerate(data["scenes"]):
-            text = clean(scene["narration"])
+            text = clean(scene.get("narration", ""))
             target = int(len(text) * min(1.8, ratio))
-            n = 0
-            while len(text) < target:
-                text += additions[(i + n) % len(additions)]
-                n += 1
-            scene["narration"] = text
+            if len(text) < target:
+                prompt = """以下のナレーションを、同じ言い回しの繰り返しを避け、具体例や詳細な解説を加えて {target}文字程度 に加筆してください。
+元のトーンを維持し、JSON以外の前置きは一切禁止です。
+元のナレーション: {text}
+
+出力形式: {{"narration": "加筆されたテキスト"}}""".format(target=target, text=text)
+                try:
+                    res = llm.request(prompt, 2000)
+                    if "narration" in res and res["narration"]:
+                        scene["narration"] = clean(res["narration"])
+                except Exception as e:
+                    log.warning("シーン%dの加筆処理失敗: %s", i + 1, e)
     else:
+        log.info("動画時間が長すぎるため、テキストを短縮します。")
         for scene in data["scenes"]:
-            text = clean(scene["narration"])
+            text = clean(scene.get("narration", ""))
             shortened = text[:max(120, int(len(text) * max(0.68, ratio)))]
             stop = max(shortened.rfind("。"), shortened.rfind("！"), shortened.rfind("？"))
             scene["narration"] = shortened[:stop + 1] if stop > len(shortened) * 0.6 else shortened
     return normalize(data, theme)
-
 
 def subtitle_chunks(text):
     output = []
