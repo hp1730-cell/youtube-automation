@@ -28,12 +28,15 @@ from googleapiclient.http import MediaFileUpload
 from json_repair import repair_json
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-VERSION = "2026.10.02-groq-json-fix-v2"
+VERSION = "2026.10.03-groq-json-fix-v3"
 WORK = Path(os.getenv("WORK_DIR", "work"))
 WORK.mkdir(parents=True, exist_ok=True)
 W, H, FPS = 1280, 720, 30
-MIN_SEC, TARGET_SEC, MAX_SEC = 280, 360, 600
+
+# 8分(480秒) 〜 10分(600秒) / 目標 9分(540秒)
+MIN_SEC, TARGET_SEC, MAX_SEC = 480, 540, 600
 MIN_CUT, MAX_CUT = 3.2, 7.0
+
 VOICE = os.getenv("EDGE_VOICE", "ja-JP-NanamiNeural")
 RATE = os.getenv("EDGE_VOICE_RATE", "+0%")
 DRY = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -300,12 +303,12 @@ def create_script(llm, theme, genre, tone, sources):
 ジャンル: {genre}
 トーン: {tone}
 条件:
-- 8〜10分、ナレーション約3800〜4600文字、9〜11シーン
+- 8〜10分、ナレーション全体で約2800〜3400文字（9〜11シーン、1シーンあたり約280〜320文字）
 - 冒頭15秒は強い疑問か意外な事実
-- 重複や冗長な前置きを避ける
+- 単なる同じ表現の繰り返しや無意味な前置きによる「引き延ばし」は絶対禁止。具体的な事例、背景、歴史、数値データ、対比構造を交えて内容を深く丁寧に解説すること。
 - 各シーンに原稿と直接対応するvisual_cutsを2個
-- queryとfallback_queryは具体的な英語検索語
-- 原稿にない著名人、企業、商品を追加しない
+- queryとfallback_queryは検索にヒットしやすいシンプルな英語検索語（1〜2単語）
+- 原稿にない著名人、企業を追加しない
 - 最後は要点のまとめ
 - JSON以外は禁止
 参考資料:
@@ -322,13 +325,14 @@ def create_script(llm, theme, genre, tone, sources):
 def adjust_duration(llm, data, seconds, theme):
     ratio = TARGET_SEC / max(seconds, 1)
     if seconds < MIN_SEC:
-        log.info("動画時間が不足しています(%.1f秒)。LLMでナレーションを加筆します。", seconds)
+        log.info("動画時間が不足しています(%.1f秒)。LLMでナレーションを加筆・深掘りします。", seconds)
         for i, scene in enumerate(data["scenes"]):
             text = clean(scene.get("narration", ""))
-            target = int(len(text) * min(1.8, ratio))
+            target = int(len(text) * min(1.6, ratio))
             if len(text) < target:
-                prompt = """以下のナレーションを、同じ言い回しの繰り返しを避け、具体例や詳細な解説を加えて {target}文字程度 に加筆してください。
+                prompt = """以下のナレーションに、同じ言い回しの繰り返しや無理な引き延ばしを一切避け、「具体的な事例」「専門的な補足」「歴史的背景」「視聴者の疑問への回答」を付け加えて {target}文字程度 に加筆・深掘りしてください。
 元のトーンを維持し、JSON以外の前置きは一切禁止です。
+
 元のナレーション: {text}
 
 出力形式: {{"narration": "加筆されたテキスト"}}""".format(target=target, text=text)
@@ -347,8 +351,8 @@ def adjust_duration(llm, data, seconds, theme):
             scene["narration"] = shortened[:stop + 1] if stop > len(shortened) * 0.6 else shortened
     return normalize(data, theme)
 
+
 def subtitle_chunks(text):
-    # 句点（。！？!?）で区切られた「一文ごと」にテロップを切る
     chunks = [s.strip() for s in re.split(r"(?<=[。！？!?])", clean(text)) if s.strip()]
     return chunks or [clean(text)]
 
@@ -762,20 +766,10 @@ def main():
     log.info("DRY_RUN: %s", DRY)
     log.info("=" * 60)
     
-    # 【修正】ここでインスタンスを変数 'llm' に格納する
     llm = LLM()
-    
-    # 生成関数に 'llm' 変数を渡す
     data = create_script(llm, theme, genre, tone, research(theme))
     
-    for attempt in range(3):
-        narr, timeline, seconds, subtitles = create_narration(data["scenes"])
-        log.info("音声実測時間: %.1f秒", seconds)
-        if MIN_SEC <= seconds <= MAX_SEC:
-            break
-        if attempt < 2:
-            # こちらも 'llm' を渡す
-            data = adjust_duration(llm, data, seconds, theme)
+    # 8〜10分の尺に合わせた時間調整ループ（最大3試行）
     for attempt in range(3):
         narr, timeline, seconds, subtitles = create_narration(data["scenes"])
         log.info("音声実測時間: %.1f秒", seconds)
@@ -783,20 +777,35 @@ def main():
             break
         if attempt < 2:
             data = adjust_duration(llm, data, seconds, theme)
+
     if not MIN_SEC <= seconds <= MAX_SEC:
         raise RuntimeError("8〜10分に調整できませんでした: {:.1f}秒".format(seconds))
+
     (WORK / "script.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     assets, credits = acquire_assets(data["scenes"], timeline)
     data["description"] = add_credits(data.get("description", ""), credits)
     final = create_final(data["scenes"], timeline, assets, narr, subtitles)
     final_seconds = duration(final)
+
     if not MIN_SEC <= final_seconds <= MAX_SEC:
         raise RuntimeError("最終動画が8〜10分外です: {:.1f}秒".format(final_seconds))
+
     thumbnail = create_thumbnail(data.get("title", theme), data["scenes"][0], assets)
     video_id = upload_video(final, thumbnail, data)
     youtube_url = "https://youtu.be/" + video_id if video_id else ""
     metadata = dict(data)
-    metadata.update({"pipeline_version": VERSION, "theme": theme, "duration_seconds": final_seconds, "youtube_url": youtube_url, "dry_run": DRY, "unique_media_count": len(USED_IDS), "used_media_ids": sorted("{}:{}".format(x[0], x[1]) for x in USED_IDS), "pixabay_credits": credits, "bgm_used": BGM.exists(), "groq_model": GROQ_MODEL})
+    metadata.update({
+        "pipeline_version": VERSION,
+        "theme": theme,
+        "duration_seconds": final_seconds,
+        "youtube_url": youtube_url,
+        "dry_run": DRY,
+        "unique_media_count": len(USED_IDS),
+        "used_media_ids": sorted("{}:{}".format(x[0], x[1]) for x in USED_IDS),
+        "pixabay_credits": credits,
+        "bgm_used": BGM.exists(),
+        "groq_model": GROQ_MODEL
+    })
     (WORK / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info("処理完了: %s", youtube_url or final)
 
