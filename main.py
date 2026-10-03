@@ -776,7 +776,7 @@ def main():
         if MIN_SEC <= seconds <= MAX_SEC:
             break
         if attempt < 2:
-            data = adjust_duration(data, seconds, theme)
+            data = adjust_duration(llm, data, seconds, theme)
     if not MIN_SEC <= seconds <= MAX_SEC:
         raise RuntimeError("8〜10分に調整できませんでした: {:.1f}秒".format(seconds))
     (WORK / "script.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
