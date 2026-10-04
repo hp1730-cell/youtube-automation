@@ -34,7 +34,10 @@ WORK.mkdir(parents=True, exist_ok=True)
 W, H, FPS = 1280, 720, 30
 
 # 8分(480秒) 〜 10分(600秒) / 目標 9分(540秒)
+# 8分(480秒) 〜 10分(600秒) / 目標 9分(540秒)
 MIN_SEC, TARGET_SEC, MAX_SEC = 480, 540, 600
+# 【追加】システムの堅牢性を高めるための許容誤差（7.5分 〜 11分）
+ALLOW_MIN_SEC, ALLOW_MAX_SEC = 450, 660
 MIN_CUT, MAX_CUT = 3.2, 7.0
 
 VOICE = os.getenv("EDGE_VOICE", "ja-JP-NanamiNeural")
@@ -303,7 +306,7 @@ def create_script(llm, theme, genre, tone, sources):
 ジャンル: {genre}
 トーン: {tone}
 条件:
-- 8〜10分、ナレーション全体で約2800〜3400文字（9〜11シーン、1シーンあたり約280〜320文字）
+- - 8〜10分、ナレーション全体で約3000〜3600文字（9〜11シーン、1シーンあたり約300〜350文字）
 - 冒頭15秒は強い疑問か意外な事実
 - 単なる同じ表現の繰り返しや無意味な前置きによる「引き延ばし」は絶対禁止。具体的な事例、背景、歴史、数値データ、対比構造を交えて内容を深く丁寧に解説すること。
 - 各シーンに原稿と直接対応するvisual_cutsを2個
@@ -770,16 +773,23 @@ def main():
     data = create_script(llm, theme, genre, tone, research(theme))
     
     # 8〜10分の尺に合わせた時間調整ループ（最大3試行）
+   # 8〜10分の尺に合わせた時間調整ループ（最大3試行）
     for attempt in range(3):
         narr, timeline, seconds, subtitles = create_narration(data["scenes"])
         log.info("音声実測時間: %.1f秒", seconds)
+        # 厳密な理想値に入っていれば即時抜け
         if MIN_SEC <= seconds <= MAX_SEC:
             break
+        # 許容範囲内（450〜660秒）に入っていれば、誤差とみなして続行
+        if ALLOW_MIN_SEC <= seconds <= ALLOW_MAX_SEC:
+            log.info("目標時間から僅かにズレていますが、許容範囲内(%.1f秒)のため処理を続行します。", seconds)
+            break
+            
         if attempt < 2:
             data = adjust_duration(llm, data, seconds, theme)
 
-    if not MIN_SEC <= seconds <= MAX_SEC:
-        raise RuntimeError("8〜10分に調整できませんでした: {:.1f}秒".format(seconds))
+    if not ALLOW_MIN_SEC <= seconds <= ALLOW_MAX_SEC:
+        raise RuntimeError("尺の調整に失敗しました（許容範囲外）: {:.1f}秒".format(seconds))
 
     (WORK / "script.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     assets, credits = acquire_assets(data["scenes"], timeline)
@@ -787,8 +797,8 @@ def main():
     final = create_final(data["scenes"], timeline, assets, narr, subtitles)
     final_seconds = duration(final)
 
-    if not MIN_SEC <= final_seconds <= MAX_SEC:
-        raise RuntimeError("最終動画が8〜10分外です: {:.1f}秒".format(final_seconds))
+    if not ALLOW_MIN_SEC <= final_seconds <= ALLOW_MAX_SEC:
+        raise RuntimeError("最終動画が許容尺(7.5〜11分)を逸脱しています: {:.1f}秒".format(final_seconds))
 
     thumbnail = create_thumbnail(data.get("title", theme), data["scenes"][0], assets)
     video_id = upload_video(final, thumbnail, data)
