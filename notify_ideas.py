@@ -50,7 +50,8 @@ def send_notification(ideas: list):
 
     msg = EmailMessage()
     msg.set_content(body)
-    msg.set_subject("【YouTube自動化】本日の動画企画案をお選びください")
+    # 辞書形式でヘッダーを設定するよう修正
+    msg["Subject"] = "【YouTube自動化】本日の動画企画案をお選びください"
     msg["To"] = MY_EMAIL
     msg["From"] = MY_EMAIL
 
