@@ -56,13 +56,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-cjk
 
-      - name: Pythonライブラリのインストール
+- name: Pythonライブラリのインストール
         run: |
-          python -m pip install --upgrade pip
-          # requirements.txtがなくても動作するように、直接主要ライブラリを指定してインストールします
-          pip install duckduckgo_search edge-tts requests trafilatura google-api-python-client google-auth-oauthlib Pillow json_repair moviepy
+          python -m pip install --upgrade pip --no-cache-dir
+          # キャッシュを使わずに、必要なライブラリを確実に一括インストールします
+          pip install --no-cache-dir duckduckgo_search edge-tts requests trafilatura google-api-python-client google-auth-oauthlib Pillow json_repair moviepy
           if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
+            pip install --no-cache-dir -r requirements.txt
           fi
 
       - name: 必須設定の確認
