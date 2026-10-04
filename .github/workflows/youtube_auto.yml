@@ -56,10 +56,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-cjk
 
-- name: Pythonライブラリのインストール
+      - name: Pythonライブラリのインストール
         run: |
           python -m pip install --upgrade pip --no-cache-dir
-          # キャッシュを使わずに、必要なライブラリを確実に一括インストールします
           pip install --no-cache-dir duckduckgo_search edge-tts requests trafilatura google-api-python-client google-auth-oauthlib Pillow json_repair moviepy
           if [ -f "requirements.txt" ]; then
             pip install --no-cache-dir -r requirements.txt
@@ -133,14 +132,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: youtube-auto-output-${{ github.run_id }}
-          # main.pyの実際の出力ファイル名に合わせて修正
           path: |
             work/final.mp4
             work/thumbnail.jpg
             work/metadata.json
             work/script.json
             work/research.json
-            work/subtitles.ass
             work/raw.mp4
             work/visual.mp4
             work/narration.m4a
