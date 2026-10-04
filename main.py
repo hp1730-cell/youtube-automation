@@ -151,10 +151,10 @@ async def create_narration_async(scenes: list):
             "end": current_time
         })
 
-    # 音声の結合
+# 音声の結合
     final_audio = concatenate_audioclips(audio_clips)
-    narration_path = WORK / "narration.m4a"
-    final_audio.write_audiofile(str(narration_path), logger=None)
+    narration_path = WORK / "narration.mp3"
+    final_audio.write_audiofile(str(narration_path), codec="libmp3lame", logger=None)
     
     for clip in audio_clips:
         clip.close()
