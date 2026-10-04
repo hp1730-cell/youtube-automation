@@ -222,19 +222,16 @@ def create_final_video(timeline: list, assets: list, narration_path: str) -> str
             if clip.duration < duration:
                 loops = int(duration // clip.duration) + 1
                 clip = concatenate_videoclips([clip] * loops)
-            # v2.x系に対応した subclipped を使用
             clip = clip.subclipped(0, duration)
         else:
-            # v2.x系に対応した with_duration を使用
             clip = ImageClip(asset_path).with_duration(duration)
             
-        # 16:9比率にリサイズ・調整（v2.x系では resized を使用）
-        clip = clip.resized(newsize=(1920, 1080))
+        # 16:9比率にリサイズ・調整（v2.x系はタプルを直接指定）
+        clip = clip.resized((1920, 1080))
         video_clips.append(clip)
 
     final_video = concatenate_videoclips(video_clips, method="compose")
     audio = AudioFileClip(narration_path)
-    # v2.x系に対応した with_audio を使用
     final_video = final_video.with_audio(audio)
     
     output_path = WORK / "final.mp4"
