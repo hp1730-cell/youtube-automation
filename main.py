@@ -221,19 +221,21 @@ def create_final_video(timeline: list, assets: list, narration_path: str) -> str
             # 尺の調整（短い場合はループ、長い場合はカット）
             if clip.duration < duration:
                 loops = int(duration // clip.duration) + 1
-                # 古いローカルインポートを削除し、ファイル先頭のインポートを利用
                 clip = concatenate_videoclips([clip] * loops)
-            clip = clip.subclip(0, duration)
+            # v2.x系に対応した subclipped を使用
+            clip = clip.subclipped(0, duration)
         else:
-            clip = ImageClip(asset_path).set_duration(duration)
+            # v2.x系に対応した with_duration を使用
+            clip = ImageClip(asset_path).with_duration(duration)
             
-        # 16:9比率にリサイズ・調整
-        clip = clip.resize(newsize=(1920, 1080))
+        # 16:9比率にリサイズ・調整（v2.x系では resized を使用）
+        clip = clip.resized(newsize=(1920, 1080))
         video_clips.append(clip)
 
     final_video = concatenate_videoclips(video_clips, method="compose")
     audio = AudioFileClip(narration_path)
-    final_video = final_video.set_audio(audio)
+    # v2.x系に対応した with_audio を使用
+    final_video = final_video.with_audio(audio)
     
     output_path = WORK / "final.mp4"
     final_video.write_videofile(
