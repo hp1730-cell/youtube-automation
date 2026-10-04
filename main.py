@@ -221,7 +221,7 @@ def create_final_video(timeline: list, assets: list, narration_path: str) -> str
             # 尺の調整（短い場合はループ、長い場合はカット）
             if clip.duration < duration:
                 loops = int(duration // clip.duration) + 1
-                from moviepy.editor import concatenate_videoclips
+                # 古いローカルインポートを削除し、ファイル先頭のインポートを利用
                 clip = concatenate_videoclips([clip] * loops)
             clip = clip.subclip(0, duration)
         else:
