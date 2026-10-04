@@ -10,7 +10,7 @@ from datetime import datetime
 import edge_tts
 from duckduckgo_search import DDGS
 from json_repair import repair_json
-from moviepy.editor import (
+from moviepy import (
     AudioFileClip,
     ImageClip,
     VideoFileClip,
