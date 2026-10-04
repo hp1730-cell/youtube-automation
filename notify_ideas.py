@@ -1,15 +1,13 @@
 import os
 import json
-import base64
-import requests
+import smtplib
 from email.message import EmailMessage
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+import requests
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-TOKEN_JSON = os.getenv("TOKEN_JSON")
-MY_EMAIL = os.getenv("MY_EMAIL")  # あなたの通知先メールアドレス
+MY_EMAIL = os.getenv("MY_EMAIL")  # あなたのGmailアドレス
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # 先ほど作った16桁のアプリパスワード
 
 def call_groq(prompt: str) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -35,29 +33,31 @@ def generate_ideas() -> list:
     return json.loads(cleaned)
 
 def send_notification(ideas: list):
-    """Gmail APIを使って企画案を自分にメール送信する"""
-    creds = Credentials.from_authorized_user_info(json.loads(TOKEN_JSON))
-    service = build("gmail", "v1", credentials=creds)
-
+    """SMTP（アプリパスワード）を使って安全にメールを送信する"""
     body = "本日のYouTube自動生成 企画案です。\n制作したい企画の番号（1, 2, 3）をこのメールに返信してください。\n\n"
     for idea in ideas:
         body += f"【番号: {idea['id']}】\nタイトル: {idea['title']}\n概要: {idea['description']}\n\n----\n"
 
-    # 企画案をJSONとして一時保存（返信されたときにタイトルを引くため）
+    # 企画案をJSONとして一時保存
     os.makedirs("work", exist_ok=True)
     with open("work/today_ideas.json", "w", encoding="utf-8") as f:
         json.dump(ideas, f, ensure_ascii=False, indent=2)
 
     msg = EmailMessage()
     msg.set_content(body)
-    # 辞書形式でヘッダーを設定するよう修正
     msg["Subject"] = "【YouTube自動化】本日の動画企画案をお選びください"
     msg["To"] = MY_EMAIL
     msg["From"] = MY_EMAIL
 
-    encoded_message = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    service.users().messages().send(userId="me", body={"raw": encoded_message}).execute()
-    print("企画案のメールを送信しました。")
+    # GmailのSMTPサーバ（SSLポート465）を経由して送信
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(MY_EMAIL, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
+        print("企画案のメールをSMTPで送信しました。")
+    except Exception as e:
+        print(f"メール送信エラー: {e}")
+        raise e
 
 if __name__ == "__main__":
     ideas = generate_ideas()
