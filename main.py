@@ -266,7 +266,8 @@ def main():
         if attempt < 2:
             script_data = adjust_duration(script_data, seconds)
 
-   if not ALLOW_MIN_SEC <= seconds <= ALLOW_MAX_SEC:
+    # 許容範囲外でもエラーにせず、警告を出して続行する
+    if not ALLOW_MIN_SEC <= seconds <= ALLOW_MAX_SEC:
         log.warning("尺が目標範囲（450〜660秒）から外れていますが（%.1f秒）、そのまま動画生成を続行します。", seconds)
 
     # script.jsonの保存
