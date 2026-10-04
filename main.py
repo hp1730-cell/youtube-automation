@@ -256,18 +256,19 @@ def main():
     script_data = generate_script(INPUT_TITLE)
     
     # 2. 尺調整ループ付き音声生成
-    for attempt in range(3):
+# 2. 尺調整ループ付き音声生成（最大2回に制限して高速化）
+    for attempt in range(2):
         narration_path, timeline, seconds = asyncio.run(create_narration_async(script_data["scenes"]))
         log.info("音声実測時間: %.1f秒", seconds)
         
         if ALLOW_MIN_SEC <= seconds <= ALLOW_MAX_SEC:
             break
-        if attempt < 2:
+        if attempt < 1:
             script_data = adjust_duration(script_data, seconds)
 
-    # 許容範囲外でもエラーにせず、警告を出して続行する
+    # 許容範囲外でも警告に留めてそのまま進行
     if not ALLOW_MIN_SEC <= seconds <= ALLOW_MAX_SEC:
-        log.warning("尺が目標範囲（450〜660秒）から外れていますが（%.1f秒）、そのまま動画生成を続行します。", seconds)
+        log.warning("尺が目標範囲から外れていますが（%.1f秒）、そのまま動画生成を続行します。", seconds)
 
     # script.jsonの保存
     (WORK / "script.json").write_text(json.dumps(script_data, ensure_ascii=False, indent=2), encoding="utf-8")
