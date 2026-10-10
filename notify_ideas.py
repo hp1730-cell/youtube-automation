@@ -1,13 +1,11 @@
 import os
 import json
-import smtplib
-from email.message import EmailMessage
 import requests
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-MY_EMAIL = os.getenv("MY_EMAIL")  # あなたのGmailアドレス
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # 先ほど作った16桁のアプリパスワード
+# メール設定の代わりにDiscord Webhook URLを取得
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 def call_groq(prompt: str) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -33,34 +31,22 @@ def generate_ideas() -> list:
     return json.loads(cleaned)
 
 def send_notification(ideas: list):
-    """SMTPを使ってメールを送信する（ポート587 STARTTLS版）"""
-    body = "本日のYouTube自動生成 企画案です。\n制作したい企画の番号（1, 2, 3）をこのメールに返信してください。\n\n"
+    """Discord Webhookを使って通知を送信する"""
+    # Discord向けにメッセージを整形（Markdown形式）
+    content = "**🚀 本日のYouTube動画企画案が届きました！**\n\n"
     for idea in ideas:
-        body += f"【番号: {idea['id']}】\nタイトル: {idea['title']}\n概要: {idea['description']}\n\n----\n"
+        content += f"**【番号: {idea['id']}】 {idea['title']}**\n{idea['description']}\n\n----\n"
+    
+    content += "\n制作したい企画の番号を教えてください！"
 
-    os.makedirs("work", exist_ok=True)
-    with open("work/today_ideas.json", "w", encoding="utf-8") as f:
-        json.dump(ideas, f, ensure_ascii=False, indent=2)
-
-    msg = EmailMessage()
-    msg.set_content(body)
-    msg["Subject"] = "【YouTube自動化】本日の動画企画案をお選びください"
-    msg["To"] = MY_EMAIL
-    msg["From"] = MY_EMAIL
-
+    # Discordへ送信
+    payload = {"content": content}
     try:
-        # --- ここから変更 ---
-        # SMTP_SSL ではなく SMTP を使用し、ポート 587 を指定
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.set_debuglevel(1) # 原因特定のためデバッグログを出力
-        server.starttls()        # TLS暗号化を開始（これが重要）
-        server.login(MY_EMAIL, GMAIL_APP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        # --- ここまで変更 ---
-        print("企画案のメールをSMTPで送信しました。")
+        res = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
+        res.raise_for_status()
+        print("Discordに通知を送信しました。")
     except Exception as e:
-        print(f"メール送信エラー: {e}")
+        print(f"Discord送信エラー: {e}")
         raise e
 
 if __name__ == "__main__":
