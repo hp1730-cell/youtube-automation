@@ -2,16 +2,17 @@ import os
 import sys
 import json
 import logging
+import requests
 import time
-import random
 import traceback
+import random
 from pathlib import Path
-import google.generativeai as genai  # 【追加】Gemini用ライブラリ
 from json_repair import repair_json
+import google.generativeai as genai
 
 # --- 設定 ---
 WORK = Path(os.getenv("WORK_DIR", "work"))
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # 【変更】Gemini用
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 INPUT_TITLE = os.getenv("INPUT_VIDEO_TITLE", "AIの進化と未来")
 INPUT_GENRE = os.getenv("INPUT_VIDEO_GENRE", "自動判定")
 INPUT_TONE = os.getenv("INPUT_VIDEO_TONE", "わかりやすく、最後まで見たくなる雰囲気")
@@ -19,41 +20,67 @@ INPUT_TONE = os.getenv("INPUT_VIDEO_TONE", "わかりやすく、最後まで見
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("YouTubeAuto")
 
-# --- Gemini API セットアップ ---
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    # モデルの選択（1.5 Proが長尺に最適）
-    model = genai.GenerativeModel('gemini-1.5-pro')
-else:
-    log.error("GEMINI_API_KEY が設定されていません。")
-    sys.exit(1)
+# 利用可能なモデルのリスト（優先度の高い順）
+# 404エラーが出た場合、自動的に次のモデルへ切り替えます
+MODELS_TO_TRY = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro",
+    "gemini-1.5-pro-latest",
+    "gemini-pro"
+]
 
 def call_gemini(prompt: str) -> str:
     """
     Gemini API 呼び出し
-    指数バックオフとジッターを実装
+    - 404エラー（モデル不在）の場合、別のモデルを試行
+    - 429エラー（制限）の場合、指数バックオフで待機
     """
-    for attempt in range(5):
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY が設定されていません。")
+
+    genai.configure(api_key=GEMINI_API_KEY)
+
+    for model_name in MODELS_TO_TRY:
+        log.info(f"モデル '{model_name}' を使用してリクエストを試行中...")
         try:
+            model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
+            
             if response.text:
                 return response.text
             else:
-                raise ValueError("Gemini returned empty response")
-                
-        except Exception as e:
-            # 429 (Too Many Requests) やその他のエラーへの対処
-            wait_time = (2 ** attempt) * 20 + random.uniform(5, 15)
-            log.warning(f"Gemini API エラー: {e}. {wait_time:.1f}秒後にリトライします (試行 {attempt+1}/5)...")
-            time.sleep(wait_time)
-            
-    raise RuntimeError("Gemini APIの呼び出しに失敗しました。")
+                log.warning(f"モデル '{model_name}' が空のレスポンスを返しました。")
+                continue
 
-# --- 階層型生成ロジック (Gemini最適化版) ---
+        except Exception as e:
+            error_msg = str(e)
+            
+            # 【ケース1】モデルが見つからない場合 (404相当)
+            if "404" in error_msg or "not found" in error_msg.lower():
+                log.error(f"モデル '{model_name}' は見つかりませんでした。次のモデルを試します。")
+                continue
+            
+            # 【ケース2】リクエスト制限に達した場合 (429相当)
+            elif "429" in error_msg or "too many requests" in error_msg.lower():
+                wait_time = random.uniform(20, 40)
+                log.warning(f"API制限検知。{wait_time:.1f}秒待機してリトライします...")
+                time.sleep(wait_time)
+                continue
+            
+            # 【ケース3】その他のエラー
+            else:
+                log.error(f"モデル '{model_name}' で予期せぬエラーが発生: {e}")
+                # 致命的なエラーでなければ、少し待って次のモデルを試す
+                time.sleep(5)
+                continue
+
+    raise RuntimeError("利用可能なすべてのGeminiモデルでリクエストに失敗しました。APIキーの権限または接続を確認してください。")
+
+# --- 階層型生成ロジック ---
 
 def generate_outline(title: str, genre: str, tone: str) -> list:
-    log.info("【Step 1】Geminiによる動画全体の構成案（プロット）作成中...")
-    
+    log.info("【Step 1】動画全体の構成案（プロット）を作成中...")
     prompt = f"""
 You are a professional YouTube scriptwriter.
 Theme: {title} / Genre: {genre} / Tone: {tone}
@@ -77,8 +104,7 @@ Requirements:
     return json.loads(repair_json(cleaned))["chapters"]
 
 def generate_detailed_scenes(chapter: dict) -> list:
-    log.info(f"【Step 2】章 '{chapter['title']}' の詳細シーンをGeminiで生成中...")
-    
+    log.info(f"【Step 2】章 '{chapter['title']}' の詳細シーンを生成中...")
     prompt = f"""
 You are a professional storyboard artist and scriptwriter.
 Chapter Title: {chapter['title']}
@@ -127,7 +153,7 @@ def build_master_storyboard() -> dict:
         }
         master_storyboard["chapters"].append(chapter_data)
         
-        # APIの負荷を抑え、制限を回避するための待機
+        # API負荷軽減のための待機
         wait_time = random.uniform(15, 30)
         log.info(f"章の完了。API保護のため {wait_time:.1f}秒 待機します...")
         time.sleep(wait_time)
