@@ -16,6 +16,7 @@ from moviepy import (
     ImageClip,
     CompositeVideoClip,
     concatenate_videoclips,
+    concatenate_audioclips,  # ← これが抜けていました！追加しました
     vfx
 )
 
@@ -31,7 +32,6 @@ log = logging.getLogger("YouTubeAuto")
 WORK = Path(os.getenv("WORK_DIR", "work"))
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 INPUT_TITLE = os.getenv("INPUT_VIDEO_TITLE", "AIの進化と未来")
 INPUT_GENRE = os.getenv("INPUT_VIDEO_GENRE", "自動判定")
 INPUT_TONE = os.getenv("INPUT_VIDEO_TONE", "わかりやすく、最後まで見たくなる雰囲気")
@@ -43,15 +43,8 @@ GLOBAL_STYLE = "High-quality cinematic anime style, Makoto Shinkai inspired, det
 def call_groq(prompt: str) -> str:
     """Groq APIを叩いてテキストを生成する"""
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7
-    }
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
     
     for attempt in range(3):
         try:
@@ -68,6 +61,7 @@ def call_groq(prompt: str) -> str:
 
 def generate_storyboard() -> dict:
     """絵コンテを生成する"""
+    log.info("AI絵コンテを生成しています...")
     prompt = f"""
 テーマ: {INPUT_TITLE} / ジャンル: {INPUT_GENRE} / 雰囲気: {INPUT_TONE}
 このテーマで、視聴者を惹きつける10〜12シーンの絵コンテを作成してください。
@@ -123,7 +117,7 @@ async def create_narration_async(scenes: list):
     return str(narration_path), timeline, current_time
 
 def generate_ai_image(prompt: str, idx: int) -> str:
-    """【重要】画像生成。失敗してもPicsumか単色で確実に返す"""
+    """【重要】画像生成。エラー時はPicsumか単色で確実に返す"""
     full_prompt = f"{prompt}, {GLOBAL_STYLE}"
     encoded_prompt = requests.utils.quote(full_prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1920&height=1080&nologo=true"
@@ -134,23 +128,19 @@ def generate_ai_image(prompt: str, idx: int) -> str:
         if res.status_code == 200 and "image" in res.headers.get("Content-Type", ""):
             img_path.write_bytes(res.content)
             return str(img_path)
-        log.warning(f"シーン {idx}: AI画像生成に失敗 (Status {res.status_code})。バックアップを使用します。")
+        log.warning(f"シーン {idx}: AI画像生成失敗 ({res.status_code})。バックアップへ。")
     except Exception as e:
-        log.warning(f"シーン {idx}: AI画像生成中にエラー {e}。バックアップを使用します。")
+        log.warning(f"シーン {idx}: AI画像生成例外 ({e})。バックアップへ。")
 
-    # --- バックアップ1: Picsum (無料の風景画像) ---
     try:
-        log.info(f"シーン {idx}: Picsumから風景画像を取得中...")
         fallback_url = f"https://picsum.photos/1920/1080?random={idx}"
         res = requests.get(fallback_url, timeout=15)
         if res.status_code == 200:
             img_path.write_bytes(res.content)
             return str(img_path)
-    except Exception as e:
-        log.warning(f"シーン {idx}: Picsumも失敗しました: {e}")
+    except Exception:
+        pass
 
-    # --- バックアップ2: 単色画像 (最終手段) ---
-    log.warning(f"シーン {idx}: 単色画像を使用します。")
     img = Image.new("RGB", (1920, 1080), color=(20, 30, 45))
     img.save(str(img_path), "JPEG")
     return str(img_path)
@@ -185,7 +175,6 @@ def create_final_video(timeline: list, scenes: list, narration_path: str) -> str
         motion = scene.get("camera_motion", "zoom_in")
         clip = apply_motion(clip, motion, duration)
         
-        # 動きを適用するためにCompositeVideoClipを使用
         scene_final = CompositeVideoClip([clip], size=(1920, 1080)).with_duration(duration)
         full_clips.append(scene_final)
 
