@@ -46,10 +46,8 @@ MODELS_TO_TRY = [
 def call_gemini(prompt: str) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が設定されていません。")
-
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-
     available_model_names = []
     try:
         for m in genai.list_models():
@@ -63,12 +61,10 @@ def call_gemini(prompt: str) -> str:
         try:
             model = genai.GenerativeModel(model_id)
             response = model.generate_content(prompt)
-            if response.text:
-                return response.text
+            if response.text: return response.text
         except Exception as e:
             err = str(e).lower()
-            if "404" in err or "not found" in err:
-                continue
+            if "404" in err or "not found" in err: continue
             elif "429" in err or "too many requests" in err:
                 wait = random.uniform(20, 40)
                 log.warning(f"制限検知。{wait:.1f}秒待機...")
@@ -81,27 +77,16 @@ def call_gemini(prompt: str) -> str:
     raise RuntimeError("すべてのモデルで失敗しました。")
 
 def safe_parse_json(raw_res: str, expected_key: str = None) -> dict:
-    """
-    AIの出力を解析し、構造を強制的に正規化する。
-    AIがリストを返した場合でも、expected_key を使って辞書にラップする。
-    """
     try:
         cleaned = raw_res.replace("```json", "").replace("```", "").strip()
         data = json.loads(repair_json(cleaned))
-        
-        # 【重要】AIがリストを直接返してきた場合 (例: [{}, {}])
         if isinstance(data, list):
-            log.info(f"AIがリスト形式で応答しました。'{expected_key}' キーでラップします。")
             return {expected_key: data} if expected_key else {"items": data}
-            
-        # AIが辞書を返したが、期待するキーがない場合
         if isinstance(data, dict) and expected_key and expected_key not in data:
-            log.warning(f"期待するキー '{expected_key}' が辞書内に見つかりません。全体をラップします。")
             return {expected_key: data}
-            
         return data
     except Exception as e:
-        log.error(f"JSON解析失敗: {e} | Raw: {raw_res[:100]}")
+        log.error(f"JSON解析失敗: {e}")
         raise
 
 def get_field_flexible(data: dict, potential_keys: list, default_val: str = "") -> str:
@@ -114,35 +99,18 @@ def get_field_flexible(data: dict, potential_keys: list, default_val: str = "") 
 
 def run_phase_1() -> dict:
     log.info("=== [Phase 1] 階層型ストーリーボード生成開始 ===")
-    
-    # 1. Outline
-    prompt_outline = f"Theme: {INPUT_TITLE}/Genre: {INPUT_GENRE}/Tone: {INPUT_TONE}. Create an 8-min YouTube outline. Output ONLY JSON: {{ 'chapters': [ {{ 'title': '...', 'duration': 60, 'goal': '...' }} ] }}"
+    prompt_outline = f"Theme: {INPUT_TITLE}/Genre: {INPUT_GENRE}/Tone: {INPUT_TONE}. Create an 8-min YouTube outline in JSON: {{ 'chapters': [ {{ 'title': '...', 'duration': 60, 'goal': '...' }} ] }}"
     raw_outline = call_gemini(prompt_outline)
+    chapters = safe_parse_json(raw_outline, "chapters").get("chapters", [])
     
-    # ここで確実に chapters リストを取得する
-    outline_data = safe_parse_json(raw_outline, "chapters")
-    chapters = outline_data.get("chapters", [])
-    
-    if not chapters:
-        raise RuntimeError("構成案（chapters）の取得に失敗しました。AIの応答が不正です。")
-
-    # 2. Details
     master_storyboard = {"video_title": INPUT_TITLE, "chapters": []}
     for chapter in chapters:
-        # chapter が dict であることを保証
-        if not isinstance(chapter, dict):
-            log.warning(f"章のデータが辞書ではありません: {chapter}. スキップします。")
-            continue
-
         chapter_title = get_field_flexible(chapter, ["title", "chapter_title", "name"], "Unknown Chapter")
         log.info(f"章 '{chapter_title}' の詳細化中...")
-        
-        prompt_detail = f"Chapter: {chapter_title}/Goal: {chapter.get('goal', '')}. Break into 10-15 scenes. Output ONLY JSON: {{ 'scenes': [ {{ 'narration': '...', 'visual_prompts': ['...', '...', '...'], 'search_keywords': ['...'], 'camera_motion': 'zoom_in' }} ] }}"
+        prompt_detail = f"Chapter: {chapter_title}/Goal: {chapter.get('goal', '')}. Break into 10-15 scenes. Output JSON: {{ 'scenes': [ {{ 'narration': '...', 'visual_prompts': ['...', '...', '...'], 'search_keywords': ['...'], 'camera_motion': 'zoom_in' }} ] }}"
         raw_detail = call_gemini(prompt_detail)
+        scenes = safe_parse_json(raw_detail, "scenes").get("scenes", [])
         
-        scene_data = safe_parse_json(raw_detail, "scenes")
-        scenes = scene_data.get("scenes", [])
-
         chapter_data = {
             "chapter_title": chapter_title,
             "chapter_duration": int(get_field_flexible(chapter, ["duration", "seconds"], 60)),
@@ -151,11 +119,9 @@ def run_phase_1() -> dict:
         }
         master_storyboard["chapters"].append(chapter_data)
         time.sleep(random.uniform(10, 20))
-
     with open(MASTER_STORYBOARD_PATH, "w", encoding="utf-8") as f:
         json.dump(master_storyboard, f, indent=2, ensure_ascii=False)
-    
-    log.info(f"=== [Phase 1] 完了! 設計図を保存しました: {MASTER_STORYBOARD_PATH} ===")
+    log.info(f"=== [Phase 1] 完了! ===")
     return master_storyboard
 
 # --- 【フェーズ2】アセット生成 & アニメーションエンジン ---
@@ -175,20 +141,39 @@ class AssetManager:
         audio_clips = []
         for idx, chap in enumerate(self.storyboard["chapters"]):
             for s_idx, scene in enumerate(chap["scenes"]):
-                text = scene.get("narration", "...")
-                path = self.audio_dir / f"s_{idx}_{s_idx}.mp3"
-                await edge_tts.Communicate(text, EDGE_VOICE).save(str(path))
-                clip = AudioFileClip(str(path))
-                duration = clip.duration
+                # 【重要】ナレーションのクレンジング
+                text = scene.get("narration", "").strip()
+                if not text or len(text) < 2:
+                    text = "解説を続けます。" # 空の場合の代替テキスト
+                
+                temp_path = self.audio_dir / f"s_{idx}_{s_idx}.mp3"
+                try:
+                    communicate = edge_tts.Communicate(text, EDGE_VOICE)
+                    await communicate.save(str(temp_path))
+                    clip = AudioFileClip(str(temp_path))
+                    duration = clip.duration
+                except Exception as e:
+                    log.error(f"音声生成失敗 (Scene {idx}_{s_idx}): {e}. 無音として扱います。")
+                    duration = 3.0 # 失敗時は3秒の無音
+                    clip = None
+
                 timeline.append({
                     "start": current_time, "end": current_time + duration,
                     "duration": duration, "narration": text,
                     "visual_prompts": scene.get("visual_prompts", []),
                     "search_keywords": scene.get("search_keywords", []),
-                    "camera_motion": scene.get("camera_motion", "zoom_in")
+                    "camera_motion": scene.get("camera_motion", "zoom_in"),
+                    "audio_clip": clip
                 })
-                audio_clips.append(clip)
-                current_time += duration
+                if clip:
+                    audio_clips.append(clip)
+                    current_time += duration
+                else:
+                    current_time += duration # 無音でも時間は進める
+
+        if not audio_clips:
+            raise RuntimeError("音声クリップが一つも生成されませんでした。")
+
         final_audio_path = WORK / "master_narration.mp3"
         final_audio = concatenate_audioclips(audio_clips)
         final_audio.write_audiofile(str(final_audio_path), codec="libmp3lame", logger=None)
@@ -217,7 +202,7 @@ class AssetManager:
             await asyncio.sleep(5)
         if PIXABAY_API_KEY:
             try:
-                res: res = requests.get(f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&q={requests.utils.quote(kw)}&image_type=photo&per_page=3")
+                res = requests.get(f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&q={requests.utils.quote(kw)}&image_type=photo&per_page=3")
                 if res.status_code == 200 and res.json()["hits"]:
                     img_data = requests.get(res.json()["hits"][0]["webformatURL"]).content
                     target.write_bytes(img_data)
@@ -230,7 +215,6 @@ class AssetManager:
     def assemble_video(self, timeline: list, audio_path: str) -> str:
         log.info("【合成】アニメーション・レンダリング開始...")
         scene_clips = []
-        audio = AudioFileClip(audio_path)
         for idx, t in enumerate(timeline):
             sub_clips = []
             sub_dur = t["duration"] / 3
@@ -252,7 +236,9 @@ class AssetManager:
             except:
                 final_s = combined
             scene_clips.append(final_s)
-        final_v = concatenate_videoclips(scene_clips, method="compose").with_audio(audio)
+
+        final_v = concatenate_videoclips(scene_clips, method="compose")
+        final_v = final_v.with_audio(AudioFileClip(audio_path))
         out = WORK / "final.mp4"
         final_v.write_videofile(str(out), fps=24, codec="libx264", audio_codec="aac", preset="medium", logger=None)
         return str(out)
@@ -275,7 +261,6 @@ async def main():
         WORK.mkdir(parents=True, exist_ok=True)
         log.info("=== Cinematic Motion Engine: 完全自動パイプライン起動 ===")
         
-        # 1. 設計図の確認・生成
         if not MASTER_STORYBOARD_PATH.exists():
             storyboard = run_phase_1()
         else:
@@ -283,7 +268,6 @@ async def main():
             with open(MASTER_STORYBOARD_PATH, "r", encoding="utf-8") as f:
                 storyboard = json.load(f)
 
-        # 2. アセット生成と動画合成
         manager = AssetManager(storyboard)
         audio_path, timeline = await manager.generate_all_audio()
         await manager.generate_all_images(timeline)
