@@ -26,12 +26,9 @@ def check_discord_replies():
 
         for msg in messages:
             content = msg.get("content", "").strip()
-            # メッセージの送信時間を取得 (ISO 8601形式)
             timestamp_str = msg.get("timestamp")
-            # 文字列を datetime オブジェクトに変換 (Zを+00:00に置換してパース)
             timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
 
-            # 「1, 2, 3 のいずれか」かつ「20分以内に送られた」メッセージか判定
             if content in ["1", "2", "3"] and timestamp > time_limit:
                 print(f"有効な最新返信を発見しました: {content} (送信時間: {timestamp})")
                 return content
@@ -45,7 +42,8 @@ def check_discord_replies():
 
 def trigger_video_workflow(choice):
     """GitHub APIを使って動画作成ワークフローを起動する"""
-    workflow_id = "pipeline.yml" # あなたのファイル名に合わせてください
+    # 【修正済み】ファイル名を正確に指定
+    workflow_id = "youtube_auto.yml" 
     url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{workflow_id}/dispatches"
     
     headers = {
@@ -64,7 +62,7 @@ def trigger_video_workflow(choice):
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=30)
         if res.status_code == 204:
-            print(f"成功：企画案 {choice} の動画作成をリクエストしました！")
+            print(f"成功：企画案 {choice} の動画作成ワークフロー（{workflow_id}）を起動しました！")
         else:
             print(f"エラー：GitHub API起動失敗 {res.status_code} - {res.text}")
     except Exception as e:
