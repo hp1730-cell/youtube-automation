@@ -37,22 +37,18 @@ EDGE_VOICE = os.getenv("EDGE_VOICE", "ja-JP-NanamiNeural")
 STYLE_ANCHOR = "High-end cinematic anime style, highly detailed digital illustration, masterpiece, 8k, vivid colors, expressive character emotions"
 MASTER_STORYBOARD_PATH = WORK / "master_storyboard.json"
 
-MODELS_TO_TRY = [
-    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"
-]
+MODELS_TO_TRY = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"]
 
 # --- 共通ユーティリティ ---
 
 def call_gemini(prompt: str) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY が設定されていません。")
+    if not GEMINI_API_KEY: raise RuntimeError("GEMINI_API_KEY が設定されていません。")
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
     available_model_names = []
     try:
         for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_model_names.append(m.name)
+            if 'generateContent' in m.supported_generation_methods: available_model_names.append(m.name)
     except:
         available_model_names = [f"models/{m}" for m in MODELS_TO_TRY]
 
@@ -66,15 +62,28 @@ def call_gemini(prompt: str) -> str:
             err = str(e).lower()
             if "404" in err or "not found" in err: continue
             elif "429" in err or "too many requests" in err:
-                wait = random.uniform(20, 40)
-                log.warning(f"制限検知。{wait:.1f}秒待機...")
-                time.sleep(wait)
+                time.sleep(random.uniform(20, 40))
                 continue
             else:
-                log.error(f"エラー: {e}")
                 time.sleep(5)
                 continue
     raise RuntimeError("すべてのモデルで失敗しました。")
+
+def flatten_list(data):
+    """
+    リストの中にリストがある場合、再帰的に展開して
+    辞書だけのシンプルなリスト [{}, {}, ...] に変換する。
+    """
+    flat = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, list):
+                flat.extend(flatten_list(item))
+            elif isinstance(item, dict):
+                flat.append(item)
+    elif isinstance(data, dict):
+        flat.append(data)
+    return flat
 
 def safe_parse_json(raw_res: str, expected_key: str = None) -> dict:
     try:
@@ -101,7 +110,10 @@ def run_phase_1() -> dict:
     log.info("=== [Phase 1] 階層型ストーリーボード生成開始 ===")
     prompt_outline = f"Theme: {INPUT_TITLE}/Genre: {INPUT_GENRE}/Tone: {INPUT_TONE}. Create an 8-min YouTube outline in JSON: {{ 'chapters': [ {{ 'title': '...', 'duration': 60, 'goal': '...' }} ] }}"
     raw_outline = call_gemini(prompt_outline)
-    chapters = safe_parse_json(raw_outline, "chapters").get("chapters", [])
+    outline_data = safe_parse_json(raw_outline, "chapters")
+    
+    # 章リストを平坦化
+    chapters = flatten_list(outline_data.get("chapters", []))
     
     master_storyboard = {"video_title": INPUT_TITLE, "chapters": []}
     for chapter in chapters:
@@ -109,7 +121,10 @@ def run_phase_1() -> dict:
         log.info(f"章 '{chapter_title}' の詳細化中...")
         prompt_detail = f"Chapter: {chapter_title}/Goal: {chapter.get('goal', '')}. Break into 10-15 scenes. Output JSON: {{ 'scenes': [ {{ 'narration': '...', 'visual_prompts': ['...', '...', '...'], 'search_keywords': ['...'], 'camera_motion': 'zoom_in' }} ] }}"
         raw_detail = call_gemini(prompt_detail)
-        scenes = safe_parse_json(raw_detail, "scenes").get("scenes", [])
+        scene_data = safe_parse_json(raw_detail, "scenes")
+        
+        # シーンリストを平坦化
+        scenes = flatten_list(scene_data.get("scenes", []))
         
         chapter_data = {
             "chapter_title": chapter_title,
@@ -141,20 +156,22 @@ class AssetManager:
         audio_clips = []
         for idx, chap in enumerate(self.storyboard["chapters"]):
             for s_idx, scene in enumerate(chap["scenes"]):
-                # 【重要】ナレーションのクレンジング
+                # 【重要】sceneがリストで届いた場合の最終防御
+                if isinstance(scene, list):
+                    scene = scene[0] if scene else {}
+                
                 text = scene.get("narration", "").strip()
                 if not text or len(text) < 2:
-                    text = "解説を続けます。" # 空の場合の代替テキスト
+                    text = "解説を続けます。"
                 
                 temp_path = self.audio_dir / f"s_{idx}_{s_idx}.mp3"
                 try:
-                    communicate = edge_tts.Communicate(text, EDGE_VOICE)
-                    await communicate.save(str(temp_path))
+                    await edge_tts.Communicate(text, EDGE_VOICE).save(str(temp_path))
                     clip = AudioFileClip(str(temp_path))
                     duration = clip.duration
                 except Exception as e:
                     log.error(f"音声生成失敗 (Scene {idx}_{s_idx}): {e}. 無音として扱います。")
-                    duration = 3.0 # 失敗時は3秒の無音
+                    duration = 3.0
                     clip = None
 
                 timeline.append({
@@ -169,7 +186,7 @@ class AssetManager:
                     audio_clips.append(clip)
                     current_time += duration
                 else:
-                    current_time += duration # 無音でも時間は進める
+                    current_time += duration
 
         if not audio_clips:
             raise RuntimeError("音声クリップが一つも生成されませんでした。")
@@ -236,7 +253,6 @@ class AssetManager:
             except:
                 final_s = combined
             scene_clips.append(final_s)
-
         final_v = concatenate_videoclips(scene_clips, method="compose")
         final_v = final_v.with_audio(AudioFileClip(audio_path))
         out = WORK / "final.mp4"
@@ -260,21 +276,17 @@ async def main():
     try:
         WORK.mkdir(parents=True, exist_ok=True)
         log.info("=== Cinematic Motion Engine: 完全自動パイプライン起動 ===")
-        
         if not MASTER_STORYBOARD_PATH.exists():
             storyboard = run_phase_1()
         else:
             log.info(f"既存の設計図を使用します: {MASTER_STORYBOARD_PATH}")
             with open(MASTER_STORYBOARD_PATH, "r", encoding="utf-8") as f:
                 storyboard = json.load(f)
-
         manager = AssetManager(storyboard)
         audio_path, timeline = await manager.generate_all_audio()
         await manager.generate_all_images(timeline)
         final_video_path = manager.assemble_video(timeline, audio_path)
-
         log.info(f"🎉 全工程完了! 動画: {final_video_path}")
-
     except Exception as e:
         log.error(f"致命的なエラー: {e}")
         log.error(traceback.format_exc())
