@@ -5,6 +5,7 @@ import asyncio
 import logging
 import requests
 import traceback
+import time  # 追加
 from pathlib import Path
 from datetime import datetime
 
@@ -16,7 +17,7 @@ from moviepy import (
     ImageClip,
     CompositeVideoClip,
     concatenate_videoclips,
-    concatenate_audioclips,  # ← これが抜けていました！追加しました
+    concatenate_audioclips,
     vfx
 )
 
@@ -36,16 +37,12 @@ INPUT_TITLE = os.getenv("INPUT_VIDEO_TITLE", "AIの進化と未来")
 INPUT_GENRE = os.getenv("INPUT_VIDEO_GENRE", "自動判定")
 INPUT_TONE = os.getenv("INPUT_VIDEO_TONE", "わかりやすく、最後まで見たくなる雰囲気")
 EDGE_VOICE = os.getenv("EDGE_VOICE", "ja-JP-NanamiNeural")
-
-# スタイル統一用
 GLOBAL_STYLE = "High-quality cinematic anime style, Makoto Shinkai inspired, detailed background, vivid colors, 8k, masterpiece"
 
 def call_groq(prompt: str) -> str:
-    """Groq APIを叩いてテキストを生成する"""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
-    
     for attempt in range(3):
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=60)
@@ -54,13 +51,10 @@ def call_groq(prompt: str) -> str:
             log.warning(f"Groq API エラー (Status {res.status_code}): {res.text}")
         except Exception as e:
             log.warning(f"Groq API 例外 (Attempt {attempt + 1}): {e}")
-        import time
         time.sleep(3)
-    
     raise RuntimeError("Groq APIの呼び出しに失敗しました。")
 
 def generate_storyboard() -> dict:
-    """絵コンテを生成する"""
     log.info("AI絵コンテを生成しています...")
     prompt = f"""
 テーマ: {INPUT_TITLE} / ジャンル: {INPUT_GENRE} / 雰囲気: {INPUT_TONE}
@@ -90,63 +84,70 @@ def generate_storyboard() -> dict:
         return json.loads(repair_json(cleaned))
 
 async def create_narration_async(scenes: list):
-    """音声を生成し、タイムラインを計算する"""
     audio_clips = []
     timeline = []
     current_time = 0.0
     temp_dir = WORK / "temp_audio"
     temp_dir.mkdir(parents=True, exist_ok=True)
-
     for idx, scene in enumerate(scenes):
         text = scene.get("text", "").strip()
         if not text: text = "解説を続けます。"
         temp_path = temp_dir / f"scene_{idx}.mp3"
-        
         communicate = edge_tts.Communicate(text, EDGE_VOICE)
         await communicate.save(str(temp_path))
-        
         clip = AudioFileClip(str(temp_path))
         duration = clip.duration
         timeline.append({"start": current_time, "end": current_time + duration})
         audio_clips.append(clip)
         current_time += duration
-
     final_audio = concatenate_audioclips(audio_clips)
     narration_path = WORK / "narration.mp3"
     final_audio.write_audiofile(str(narration_path), codec="libmp3lame", logger=None)
     return str(narration_path), timeline, current_time
 
 def generate_ai_image(prompt: str, idx: int) -> str:
-    """【重要】画像生成。エラー時はPicsumか単色で確実に返す"""
+    """【究極の安定版】画像生成。API拒否時は即座にバックアップへ"""
     full_prompt = f"{prompt}, {GLOBAL_STYLE}"
     encoded_prompt = requests.utils.quote(full_prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1920&height=1080&nologo=true"
     img_path = WORK / f"scene_{idx}.jpg"
     
+    # 1. まずAI生成を試みる
     try:
-        res = requests.get(url, timeout=20)
+        log.info(f"シーン {idx}: AI画像生成を試行中...")
+        res = requests.get(url, timeout=15)
+        # 402エラーや画像以外のレスポンスをチェック
         if res.status_code == 200 and "image" in res.headers.get("Content-Type", ""):
             img_path.write_bytes(res.content)
+            log.info(f"シーン {idx}: AI画像生成に成功しました。")
+            time.sleep(3)  # 【重要】API制限を避けるために待機
             return str(img_path)
-        log.warning(f"シーン {idx}: AI画像生成失敗 ({res.status_code})。バックアップへ。")
+        else:
+            log.warning(f"シーン {idx}: AI生成が拒否されました (Status {res.status_code})。")
     except Exception as e:
-        log.warning(f"シーン {idx}: AI画像生成例外 ({e})。バックアップへ。")
+        log.warning(f"シーン {idx}: AI生成中に例外が発生 ({e})。")
 
+    # 2. AIがダメなら、Picsum（風景写真）で賢くバックアップ
     try:
+        log.info(f"シーン {idx}: バックアップとしてPicsum画像を取得中...")
+        # プロンプトの一部を使って、関連性の高いキーワードを抽出（簡易版）
+        # ここでは安全のため、ランダムな風景を取得
         fallback_url = f"https://picsum.photos/1920/1080?random={idx}"
         res = requests.get(fallback_url, timeout=15)
         if res.status_code == 200:
             img_path.write_bytes(res.content)
+            log.info(f"シーン {idx}: Picsumバックアップに成功しました。")
             return str(img_path)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"シーン {idx}: Picsumも失敗しました ({e})。")
 
+    # 3. 最終手段：単色画像
+    log.warning(f"シーン {idx}: 最終手段として単色画像を使用します。")
     img = Image.new("RGB", (1920, 1080), color=(20, 30, 45))
     img.save(str(img_path), "JPEG")
     return str(img_path)
 
 def apply_motion(clip, motion, duration):
-    """カメラワークの適用"""
     if motion == "zoom_in":
         return clip.with_effects([vfx.Resize(lambda t: 1 + 0.05 * t)])
     elif motion == "zoom_out":
