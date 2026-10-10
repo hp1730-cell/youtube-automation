@@ -1,29 +1,15 @@
-name: YouTube Auto Pipeline Manager
+name: Discord-to-GitHub-Trigger
 
 on:
-  # 毎朝8時（日本時間）に企画案をDiscordに送信
+  # 1. 毎日 日本時間 朝8:00 に自動実行
   schedule:
-    - cron: '0 23 * * *'    # UTC 23:00 = 日本時間 8:00
-    - cron: '*/15 * * * *'  # 【試運転用】15分おきに返信をチェック
+    - cron: '0 23 * * *'  # UTC 23:00 = 日本時間 翌朝 08:00
   
-  # 手動でいつでも実行できるようにする
+  # 2. 手動でいつでも実行可能
   workflow_dispatch:
-    inputs:
-      action_type:
-        description: "実行するアクションを選択"
-        required: true
-        default: "send_ideas"
-        type: choice
-        options:
-          - "send_ideas"        # 企画案を送信
-          - "check_replies"     # 今すぐ返信があるかチェック
-          - "run_all_manual"    # (予備)
-
-permissions:
-  contents: read
 
 jobs:
-  run-pipeline:
+  check-discord:
     runs-on: ubuntu-latest
     steps:
       - name: リポジトリのチェックアウト
@@ -34,24 +20,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 依存ライブラリのインストール
+      - name: ライブラリのインストール
         run: pip install requests
 
-      # 1. 企画案をDiscordに送信するステップ
-      - name: 企画案のDiscord送信 (send_ideas)
-        # スケジュールが朝8時のとき、または手動で send_ideas を選んだときだけ実行
-        if: (github.event_name == 'schedule' && github.event.schedule == '0 23 * * *') || github.event.inputs.action_type == 'send_ideas'
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python notify_ideas.py
-
-      # 2. Discordの返信をチェックして動画作成を起動するステップ
-      - name: Discord返信チェックと動画起動
-        # スケジュールが15分おきのとき、または手動で check_replies を選んだときだけ実行
-        if: (github.event_name == 'schedule' && github.event.schedule == '*/15 * * * *') || github.event.inputs.action_type == 'check_replies'
+      - name: Discordチェックとワークフロー起動
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}
-        run: python check_discord.py
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python check_discord.py  # ← あなたのPythonファイル名に書き換えてください
