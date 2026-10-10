@@ -1,195 +1,150 @@
 import os
 import sys
 import json
-import asyncio
 import logging
 import requests
-import traceback
-import time  # 待ち時間用
+import time
 from pathlib import Path
-from datetime import datetime
-
-import edge_tts
 from json_repair import repair_json
-from PIL import Image
-from moviepy import (
-    AudioFileClip,
-    ImageClip,
-    CompositeVideoClip,
-    concatenate_videoclips,
-    concatenate_audioclips,
-    vfx
-)
 
-# --- ログ・環境設定 ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("YouTubeAuto")
-
+# --- 設定 (既存のものを継承) ---
 WORK = Path(os.getenv("WORK_DIR", "work"))
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 INPUT_TITLE = os.getenv("INPUT_VIDEO_TITLE", "AIの進化と未来")
 INPUT_GENRE = os.getenv("INPUT_VIDEO_GENRE", "自動判定")
 INPUT_TONE = os.getenv("INPUT_VIDEO_TONE", "わかりやすく、最後まで見たくなる雰囲気")
-EDGE_VOICE = os.getenv("EDGE_VOICE", "ja-JP-NanamiNeural")
-GLOBAL_STYLE = "High-quality cinematic anime style, Makoto Shinkai inspired, detailed background, vivid colors, 8k, masterpiece"
+
+log = logging.getLogger("YouTubeAuto")
 
 def call_groq(prompt: str) -> str:
+    """Groq API 呼び出し (リトライ機能付き)"""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
+    
     for attempt in range(3):
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=60)
             if res.status_code == 200:
                 return res.json()["choices"][0]["message"]["content"]
-            log.warning(f"Groq API エラー ({res.status_code})")
+            log.warning(f"Groq API Error ({res.status_code}). Retrying...")
         except Exception as e:
-            log.warning(f"Groq API 例外 ({attempt+1}): {e}")
-        time.sleep(3)
+            log.warning(f"Groq API Exception ({attempt+1}): {e}")
+        time.sleep(5)
     raise RuntimeError("Groq APIの呼び出しに失敗しました。")
 
-def generate_storyboard() -> dict:
-    log.info("AI絵コンテを生成中...")
+# --- 新しい階層型生成ロジック ---
+
+def generate_outline(title: str, genre: str, tone: str) -> list:
+    """【Step 1】動画全体の章立て（構成案）を生成する"""
+    log.info("【Step 1】動画全体の構成案（プロット）を作成中...")
+    
     prompt = f"""
-テーマ: {INPUT_TITLE} / ジャンル: {INPUT_GENRE} / 雰囲気: {INPUT_TONE}
-このテーマに基づき、10〜12シーンのYouTube動画用絵コンテをJSON形式で作成してください。
+あなたはプロのYouTube構成作家です。
+テーマ: {title} / ジャンル: {genre} / 雰囲気: {tone}
+
+このテーマに基づき、8分間の動画のための「構成案（Outline）」をJSON形式で作成してください。
+視聴者が最後まで釘付けになるよう、「起承転結」に基づいたドラマチックな展開にしてください。
+
 【条件】
-- 各シーンの `text` は詳細に。
-- `visual_prompt` は、そのシーンの内容を完璧に表す、具体的で詳細な英語の指示文。
-- `camera_motion` は "zoom_in", "zoom_out", "pan_right", "pan_left" から選択。
-- 出力は純粋なJSONのみ。
+- 動画を5〜6つの「章 (Chapters)」に分けてください。
+- 各章には `title` (章のタイトル), `duration` (想定秒数), `goal` (その章で伝えるべき内容の要約) を含めてください。
+- 合計時間が約480秒（8分）になるようにしてください。
+
+出力は純粋なJSONのみ：
 {{
-  "title": "タイトル",
-  "description": "概要",
-  "scenes": [
-    {{ "text": "...", "visual_prompt": "...", "camera_motion": "zoom_in" }}
+  "chapters": [
+    {{ "title": "導入: 衝撃の事実", "duration": 60, "goal": "視聴者の興味を惹きつける" }},
+    {{ "title": "第1章: 過去の技術", "duration": 90, "goal": "..." }},
+    ...
   ]
 }}
 """
     raw_res = call_groq(prompt)
     cleaned = raw_res.replace("```json", "").replace("```", "").strip()
-    return json.loads(repair_json(cleaned))
+    return json.loads(repair_json(cleaned))["chapters"]
 
-async def create_narration_async(scenes: list):
-    audio_clips = []
-    timeline = []
-    current_time = 0.0
-    temp_dir = WORK / "temp_audio"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
-    for idx, scene in enumerate(scenes):
-        text = scene.get("text", "").strip()
-        if not text: text = "解説を続けます。"
-        temp_path = temp_dir / f"scene_{idx}.mp3"
-        communicate = edge_tts.Communicate(text, EDGE_VOICE)
-        await communicate.save(str(temp_path))
-        clip = AudioFileClip(str(temp_path))
-        duration = clip.duration
-        timeline.append({"start": current_time, "end": current_time + duration})
-        audio_clips.append(clip)
-        current_time += duration
-
-    final_audio = concatenate_audioclips(audio_clips)
-    narration_path = WORK / "narration.mp3"
-    final_audio.write_audiofile(str(narration_path), codec="libmp3lame", logger=None)
-    return str(narration_path), timeline, current_time
-
-def generate_ai_image(prompt: str, idx: int) -> str:
-    """【鉄壁の画像生成】API制限を回避し、テーマに沿った画像を確実に確保する"""
-    full_prompt = f"{prompt}, {GLOBAL_STYLE}"
-    encoded_prompt = requests.utils.quote(full_prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1920&height=1080&nologo=true"
-    img_path = WORK / f"scene_{idx}.jpg"
+def generate_detailed_scenes(chapter: dict) -> list:
+    """【Step 2】各章の詳細なシーン（ナレーション＋画像指示）を生成する"""
+    log.info(f"【Step 2】章 '{chapter['title']}' の詳細台本を生成中...")
     
-    for attempt in range(3):  # 最大3回リトライ
-        try:
-            log.info(f"シーン {idx}: AI画像生成中 (試行 {attempt+1}/3)...")
-            res = requests.get(url, timeout=20)
+    prompt = f"""
+あなたはプロの動画脚本家兼、絵コンテ作家です。
+章のタイトル: {chapter['title']}
+章の目的: {chapter['goal']}
+想定時間: {chapter['duration']}秒
+
+この章の内容を、視聴者が飽きないように、10〜15個の「シーン (Scenes)」に分解してください。
+
+【各シーンの条件】
+1. `narration`: 視聴者に語りかける、情緒的で詳細な日本語のナレーション（5〜10秒分）。
+2. `visual_prompts`: そのナレーションを表現するための「3つの異なる視覚的な英語プロンプト」。
+   - 1枚目は「引きの絵 (Wide Shot)」
+   - 2枚目は「寄りの絵 (Medium/Close-up Shot)」
+   - 3枚目は「動きのある絵 (Action/Dynamic Shot)」
+   - ※すべて「High-end cinematic anime style, highly detailed digital illustration, masterpiece, 8k」という画風を前提にすること。
+3. `search_keywords`: 画像検索用の短い英語のキーワード（1〜3語）。
+4. `camera_motion`: "zoom_in", "zoom_out", "pan_right", "pan_left" から選択。
+
+出力は純粋なJSONのみ：
+{{
+  "scenes": [
+    {{
+      "narration": "...",
+      "visual_prompts": ["...", "...", "..."],
+      "search_keywords": ["...", "..."],
+      "camera_motion": "zoom_in"
+    }}
+  ]
+}}
+"""
+    raw_res = call_groq(prompt)
+    cleaned = raw_res.replace("```json", "").replace("```", "").strip()
+    return json.loads(repair_json(cleaned))["scenes"]
+
+def build_master_storyboard() -> dict:
+    """全てのプロセスを統合し、マスター・ストーリーボードを構築する"""
+    log.info("=== 階層型ストーリーボード生成プロセス開始 ===")
+    
+    # 1. 構成案の作成
+    chapters = generate_outline(INPUT_TITLE, INPUT_GENRE, INPUT_TONE)
+    
+    master_storyboard = {
+        "video_title": INPUT_TITLE,
+        "chapters": []
+    }
+    
+    # 2. 各章の詳細化
+    for chapter in chapters:
+        chapter_data = {
+            "chapter_title": chapter["title"],
+            "chapter_duration": chapter["duration"],
+            "chapter_goal": chapter["goal"],
+            "scenes": generate_detailed_scenes(chapter)
+        }
+        master_storyboard["chapters"].append(chapter_data)
+        # 章の間に少し休憩（API負荷軽減）
+        time.sleep(2)
+
+    # 3. マスター・ストーリーボードの保存
+    storyboard_path = WORK / "master_storyboard.json"
+    with open(storyboard_path, "w", encoding="utf-8") as f:
+            json.dump(master_storyboard, master__storyboard, indent=2, ensure_ascii=False)
             
-            if res.status_code == 200 and "image" in res.headers.get("Content-Type", ""):
-                img_path.write_bytes(res.content)
-                log.info(f"シーン {idx}: AI画像生成に成功しました。")
-                time.sleep(5)  # APIのレートリミットを避けるための待機
-                return str(img_path)
-            else:
-                log.warning(f"シーン {idx}: API拒否 (Status {res.status_code})。リトライします。")
-        except Exception as e:
-            log.warning(f"シーン {idx}: 通信エラー {e}")
-        
-        time.sleep(5) # 失敗時は少し待つ
-
-    # --- 【バックアップ策】AIがダメな場合 ---
-    log.warning(f"シーン {idx}: AI生成失敗。Picsum(風景写真)を使用します。")
-    try:
-        fallback_url = f"https://picsum.photos/1920/1080?random={idx}"
-        res = requests.get(fallback_url, timeout=15)
-        if res.status_code == 200:
-            img_path.write_bytes(res.content)
-            return str(img_path)
-    except:
-        pass
-
-    log.warning(f"シーン {idx}: 最終手段として単色画像を使用します。")
-    img = Image.new("RGB", (1920, 1080), color=(20, 30, 45))
-    img.save(str(img_path), "JPEG")
-    return str(img_path)
-
-def apply_motion(clip, motion, duration):
-    if motion == "zoom_in":
-        return clip.with_effects([vfx.Resize(lambda t: 1 + 0.05 * t)])
-    elif motion == "zoom_out":
-        return clip.with_effects([vfx.Resize(lambda t: 1.1 - 0.05 * t)])
-    elif motion == "pan_right":
-        clip = clip.resized((int(1920 * 1.2), 1080))
-        return clip.with_position(lambda t: (-int(1920 * 0.2 * (t/duration)), "center"))
-    elif motion == "pan_left":
-        clip = clip.resized((int(1920 * 1.2), 1080))
-        return clip.with_position(lambda t: (int(1920 * 0.2 * (t/duration)), "center"))
-    return clip
-
-def create_final_video(timeline: list, scenes: list, narration_path: str) -> str:
-    log.info("動画合成を開始します...")
-    full_clips = []
-    audio = AudioFileClip(narration_path)
-
-    for idx, t in enumerate(timeline):
-        duration = t["end"] - t["start"]
-        scene = scenes[idx]
-        
-        # そのシーン専用の画像を生成（テーマが一致する）
-        img_path = generate_ai_image(scene["visual_prompt"], idx)
-        
-        clip = ImageClip(img_path).with_duration(duration).resized((1920, 1080))
-        motion = scene.get("camera_motion", "zoom_in")
-        clip = apply_motion(clip, motion, duration)
-        
-        scene_final = CompositeVideoClip([clip], size=(1920, 1080)).with_duration(duration)
-        full_clips.append(scene_final)
-
-    final_video = concatenate_videoclips(full_clips, method="compose")
-    final_video = final_video.with_audio(audio)
-    final_video = final_video.with_duration(audio.duration) 
-
-    output_path = WORK / "final.mp4"
-    final_video.write_videofile(str(output_path), fps=24, codec="libx264", audio_codec="aac", preset="fast", logger=None)
-    return str(output_path)
+    log.info(f"=== 生成完了! マスター・ストーリーボード保存: {storyboard_path} ===")
+    return master_storyboard
 
 def main():
     try:
         WORK.mkdir(parents=True, exist_ok=True)
-        log.info("=== AI絵コンテ・モーションビデオ生成システム起動 ===")
+        log.info("=== AI階層型ストーリーボード生成システム起動 ===")
         
-        # 1. 台本生成
-        storyboard = generate_storyboard()
+        # 【フェーズ1】のみを実行
+        master_storyboard = build_master_storyboard()
         
-        # 2. 音声生成
-        narration_path, timeline, total_sec = asyncio.run(create_narration_async(storyboard["scenes"]))
+        log.info("動画の『脳』が完成しました。次のフェーズ（音声・画像）へ進む準備が整いました。")
         
-        # 3. 画像生成 ＋ 動画合成（一気通貫）
-        final_path = create_final_video(timeline, storyboard["scenes"], narration_path)
-        
-        log.info(f"動画生成完了: {final_path}")
     except Exception as e:
         log.error(f"致命的なエラーが発生しました: {e}")
         log.error(traceback.format_exc())
