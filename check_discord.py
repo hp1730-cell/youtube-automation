@@ -32,7 +32,7 @@ def check_discord_replies():
 def trigger_video_workflow(choice):
     """GitHub APIを使って、動画作成ワークフロー(pipeline.yml)を起動する"""
     # 起動したいワークフローのファイル名を指定
-    workflow_id = "pipeline.yml" 
+    workflow_id = "youtube_auto.yml" 
     url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{workflow_id}/dispatches"
     
     headers = {
