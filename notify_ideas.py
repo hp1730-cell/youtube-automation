@@ -33,12 +33,11 @@ def generate_ideas() -> list:
     return json.loads(cleaned)
 
 def send_notification(ideas: list):
-    """SMTP（アプリパスワード）を使って安全にメールを送信する"""
+    """SMTPを使ってメールを送信する（ポート587 STARTTLS版）"""
     body = "本日のYouTube自動生成 企画案です。\n制作したい企画の番号（1, 2, 3）をこのメールに返信してください。\n\n"
     for idea in ideas:
         body += f"【番号: {idea['id']}】\nタイトル: {idea['title']}\n概要: {idea['description']}\n\n----\n"
 
-    # 企画案をJSONとして一時保存
     os.makedirs("work", exist_ok=True)
     with open("work/today_ideas.json", "w", encoding="utf-8") as f:
         json.dump(ideas, f, ensure_ascii=False, indent=2)
@@ -49,11 +48,16 @@ def send_notification(ideas: list):
     msg["To"] = MY_EMAIL
     msg["From"] = MY_EMAIL
 
-    # GmailのSMTPサーバ（SSLポート465）を経由して送信
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(MY_EMAIL, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
+        # --- ここから変更 ---
+        # SMTP_SSL ではなく SMTP を使用し、ポート 587 を指定
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.set_debuglevel(1) # 原因特定のためデバッグログを出力
+        server.starttls()        # TLS暗号化を開始（これが重要）
+        server.login(MY_EMAIL, GMAIL_APP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        # --- ここまで変更 ---
         print("企画案のメールをSMTPで送信しました。")
     except Exception as e:
         print(f"メール送信エラー: {e}")
