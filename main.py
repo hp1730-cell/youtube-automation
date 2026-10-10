@@ -121,6 +121,7 @@ async def create_narration_async(scenes: list):
     return str(narration_path), timeline, current_time
 
 def generate_ai_image(prompt: str, idx: int):
+    """Pollinations AIを使用して、スタイル統一された画像を生成し、正当性を確認して保存する"""
     full_prompt = f"{prompt}, {GLOBAL_STYLE}"
     encoded_prompt = requests.utils.quote(full_prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1920&height=1080&nologo=true"
@@ -128,12 +129,21 @@ def generate_ai_image(prompt: str, idx: int):
     img_path = WORK / f"scene_{idx}.jpg"
     try:
         res = requests.get(url, timeout=30)
+        res.raise_for_status()
+        
+        # 【重要】レスポンスが本当に画像であることを確認
+        content_type = res.headers.get("Content-Type", "")
+        if "image" not in content_type:
+            log.warning(f"シーン {idx}: APIが画像を返しませんでした (Content-Type: {content_type})")
+            raise ValueError("Response is not an image")
+            
         img_path.write_bytes(res.content)
         return str(img_path)
     except Exception as e:
-        log.warning(f"画像生成失敗 {idx}: {e}")
+        log.error(f"画像生成失敗 {idx}: {e}")
+        # フォールバック：確実に開ける単色画像を生成して保存
         img = Image.new("RGB", (1920, 1080), color=(20, 30, 45))
-        img.save(str(img_path))
+        img.save(str(img_path), "JPEG")
         return str(img_path)
 
 def apply_motion(clip, motion, duration):
