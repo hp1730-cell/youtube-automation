@@ -1,11 +1,12 @@
 name: YouTube Auto Pipeline Manager
 
 on:
-  # 毎朝8時（日本時間）に自動で企画案をDiscord送信
+  # 毎朝8時（日本時間）に企画案をDiscordに送信
   schedule:
-    - cron: '0 23 * * *'  # UTC 23:00 = 日本時間 8:00
+    - cron: '0 23 * * *'    # UTC 23:00 = 日本時間 8:00
+    - cron: '*/15 * * * *'  # 【試運転用】15分おきに返信をチェック
   
-  # 手動でいつでもトリガーできるようにする
+  # 手動でいつでも実行できるようにする
   workflow_dispatch:
     inputs:
       action_type:
@@ -14,9 +15,9 @@ on:
         default: "send_ideas"
         type: choice
         options:
-          - "send_ideas"        # 企画案をDiscord送信する
-          - "check_replies"     # 返信をチェックして動画を作る
-          - "run_all_manual"    # すぐに動画を作る（テーマ指定）
+          - "send_ideas"        # 企画案を送信
+          - "check_replies"     # 今すぐ返信があるかチェック
+          - "run_all_manual"    # (予備)
 
 permissions:
   contents: read
@@ -32,29 +33,25 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
 
       - name: 依存ライブラリのインストール
-        run: |
-          python -m pip install --upgrade pip --no-cache-dir
-          pip install --no-cache-dir edge-tts requests Pillow json_repair google-api-python-client google-auth-oauthlib
+        run: pip install requests
 
+      # 1. 企画案をDiscordに送信するステップ
       - name: 企画案のDiscord送信 (send_ideas)
-        if: github.event_name == 'schedule' || github.event.inputs.action_type == 'send_ideas'
+        # スケジュールが朝8時のとき、または手動で send_ideas を選んだときだけ実行
+        if: (github.event_name == 'schedule' && github.event.schedule == '0 23 * * *') || github.event.inputs.action_type == 'send_ideas'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }} # ← 追加済み
-          MY_EMAIL: ${{ secrets.MY_EMAIL }}
-        run: |
-          python notify_ideas.py
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python notify_ideas.py
 
-      - name: 返信のチェックと自動生成 (check_replies)
-        if: github.event.inputs.action_type == 'check_replies'
+      # 2. Discordの返信をチェックして動画作成を起動するステップ
+      - name: Discord返信チェックと動画起動
+        # スケジュールが15分おきのとき、または手動で check_replies を選んだときだけ実行
+        if: (github.event_name == 'schedule' && github.event.schedule == '*/15 * * * *') || github.event.inputs.action_type == 'check_replies'
         env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-          MY_EMAIL: ${{ secrets.MY_EMAIL }}
-        run: |
-          python receive_and_trigger.py
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: python check_discord.py
