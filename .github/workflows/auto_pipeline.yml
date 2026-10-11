@@ -29,32 +29,39 @@ def send_discord_message(text):
     res.raise_for_status()
 
 def main():
-    log.info("--- YouTube企画案・簡略版送信プログラム開始 ---")
+    log.info("--- YouTube企画案・分析エッセンス送信プログラム開始 ---")
 
     if not GEMINI_API_KEY or not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         log.error("必要な環境変数（GEMINI_API_KEY, DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID）が設定されていません。")
         sys.exit(1)
 
-    log.info("Geminiがトレンド分析および企画立案中...")
+    log.info("Geminiが最新トレンドを分析し、企画を立案中...")
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # プロンプトを「分析は内部でやり、出力は最小限に」と変更
+        # 分析の根拠を少し出すようにプロンプトを調整
         prompt = """
-あなたはYouTubeの超一流プロデューサーです。
-Google検索を用いて最新トレンドを徹底的に分析した上で、バズる企画を3つ立案してください。
+あなたはYouTubeの超一流プロデューサー兼マーケティングコンサルタントです。
+Google検索を用いて最新トレンドを徹底的にリサーチし、今最もバズる可能性が高い企画を3つ立案してください。
 
 【重要：出力形式】
-詳細な分析プロセスは内部で完結させ、Discordへ送信するため、以下の【出力フォーマット】のみを返してください。余計な挨拶や解説は一切不要です。
+詳細な思考プロセスは内部で完結させ、Discordへ送信するため、以下の【出力フォーマット】のみを返してください。
+挨拶や「承知いたしました」などの前置きは一切不要です。
 
 【出力フォーマット】
-📊 【本日のトレンド】
-(現在のトレンドを1行で簡潔に)
+📊 【本日の市場トレンド分析】
+・現在の主要トレンド：(いま何が話題か)
+・分析根拠：(なぜ今これが求められているのか、どのようなユーザー心理があるのかを2行で簡潔に)
 
-💡 【企画案】
-1. [タイトル]：[ウケる理由を短く]
-2. [タイトル]：[ウケる理由を短く]
-3. [タイトル]：[ウケる理由を短く]
+💡 【YouTube動画企画案（全3選）】
+1. [タイトル]
+   - 勝算：[なぜこれでバズるのか、具体的な理由を短く]
+
+2. [タイトル]
+   - 勝算：[なぜこれでバズるのか、具体的な理由を短く]
+
+3. [タイトル]
+   - 勝算：[なぜこれでバズるのか、具体的な理由を短く]
 
 作成する企画の番号（1〜3）を返信してください。
 """
@@ -68,13 +75,13 @@ Google検索を用いて最新トレンドを徹底的に分析した上で、�
             ),
         )
         ideas_text = response.text
-        log.info("企画案の生成に成功しました。")
+        log.info("分析および企画案の生成に成功しました。")
     except Exception as e:
         log.error(f"Gemini APIエラー: {e}")
         sys.exit(1)
 
     # Discordへ送信
-    log.info(f"Discordへ簡略版レポートを送信中...")
+    log.info(f"Discordへ送信中...")
     try:
         send_discord_message(ideas_text)
         log.info("Discordへの送信が完了しました！")
