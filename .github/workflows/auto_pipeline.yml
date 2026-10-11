@@ -12,7 +12,7 @@ on:
         required: false
 
 jobs:
-  # --- ジョブ1：トレンド分析（自動・手動 両方で必ず実行） ---
+  # --- ジョブ1：トレンド分析（Groqへ完全移行） ---
   trend_analysis:
     runs-on: ubuntu-latest
     steps:
@@ -21,23 +21,23 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install Analysis Libs
-        run: pip install google-genai requests
+        # google-genaiを削除し、groqをインストール
+        run: pip install groq requests
       - name: Analyze and Notify
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
         run: |
           python3 <<EOF
-          import os, requests, time
-          from google import genai
-          from google.genai import types, errors
+          import os, requests
+          from groq import Groq
 
-          client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-          # 試行するモデルのリスト（制限が緩い順）
-          MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-1.5-flash', 'gemini-1.0-pro']
+          client = Groq(api_key=os.getenv("GROQ_API_KEY"))
           
+          # 高性能な Llama 3.3 70B を使用（Gemma2-9b-it などに変更可能）
+          model_name = "llama-3.3-70b-versatile"
+
           prompt = """
           あなたはYouTubeプロデューサーです。最新トレンドを分析し、バズる企画を3つ立案してください。
           【出力フォーマット】
@@ -51,34 +51,22 @@ jobs:
           作成する企画の番号を返信してください。
           """
 
-          response_text = None
-          
-          # モデルを順に試行し、429エラーが出たら待機して次を試す
-          for model_name in MODELS_TO_TRY:
-              try:
-                  print(f"Trying model: {model_name}...")
-                  response = client.models.generate_content(
-                      model=model_name,
-                      contents=prompt,
-                      config=types.GenerateContentConfig(tools=[{"google_search": {}}])
-                  )
-                  response_text = response.text
-                  print(f"Successfully generated content using {model_name}")
-                  break # 成功したらループを抜ける
-              except errors.ClientError as e:
-                  if "429" in str(e):
-                      print(f"Quota exceeded for {model_name}. Waiting 60 seconds before next attempt...")
-                      time.sleep(60) # 1分待機して次のモデルへ
-                  else:
-                      print(f"An unexpected error occurred with {model_name}: {e}")
-                      continue
+          try:
+              completion = client.chat.completions.create(
+                  model=model_name,
+                  messages=[
+                      {"role": "system", "content": "あなたは優秀なYouTubeプロデューサーです。"},
+                      {"role": "user", "content": prompt}
+                  ],
+                  temperature=0.7,
+              )
+              response_text = completion.choices[0].message.content
+          except Exception as e:
+              print(f"Groq API Error: {e}")
+              exit(1)
 
-          if response_text:
-              url = f"https://discord.com/api/v10/channels/{os.getenv('DISCORD_CHANNEL_ID')}/messages"
-              requests.post(url, headers={"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN')}"}, json={"content": response_text})
-          else:
-              print("All models failed due to quota limits.")
-              exit(1) # すべて失敗した場合はエラーとして終了
+          url = f"https://discord.com/api/v10/channels/{os.getenv('DISCORD_CHANNEL_ID')}/messages"
+          requests.post(url, headers={"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN')}"}, json={"content": response_text})
           EOF
 
   # --- ジョブ2：動画生成（手動実行かつタイトルが入力された時のみ実行） ---
@@ -105,7 +93,9 @@ jobs:
 
       - name: Run Video Engine
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # main.py側でもGroqを使うように修正が必要です
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
           WORK_DIR: "work"
