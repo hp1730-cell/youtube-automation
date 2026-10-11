@@ -29,10 +29,15 @@ jobs:
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
         run: |
           python3 <<EOF
-          import os, requests
+          import os, requests, time
           from google import genai
-          from google.genai import types
+          from google.genai import types, errors
+
           client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+          # 試行するモデルのリスト（制限が緩い順）
+          MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-1.5-flash', 'gemini-1.0-pro']
+          
           prompt = """
           あなたはYouTubeプロデューサーです。最新トレンドを分析し、バズる企画を3つ立案してください。
           【出力フォーマット】
@@ -45,20 +50,40 @@ jobs:
           3. [タイトル]：[勝算を短く]
           作成する企画の番号を返信してください。
           """
-          response = client.models.generate_content(
-              model='gemini-3.8-flash',
-              contents=prompt,
-              config=types.GenerateContentConfig(tools=[{"google_search": {}}])
-          )
-          url = f"https://discord.com/api/v10/channels/{os.getenv('DISCORD_CHANNEL_ID')}/messages"
-          requests.post(url, headers={"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN')}"}, json={"content": response.text})
+
+          response_text = None
+          
+          # モデルを順に試行し、429エラーが出たら待機して次を試す
+          for model_name in MODELS_TO_TRY:
+              try:
+                  print(f"Trying model: {model_name}...")
+                  response = client.models.generate_content(
+                      model=model_name,
+                      contents=prompt,
+                      config=types.GenerateContentConfig(tools=[{"google_search": {}}])
+                  )
+                  response_text = response.text
+                  print(f"Successfully generated content using {model_name}")
+                  break # 成功したらループを抜ける
+              except errors.ClientError as e:
+                  if "429" in str(e):
+                      print(f"Quota exceeded for {model_name}. Waiting 60 seconds before next attempt...")
+                      time.sleep(60) # 1分待機して次のモデルへ
+                  else:
+                      print(f"An unexpected error occurred with {model_name}: {e}")
+                      continue
+
+          if response_text:
+              url = f"https://discord.com/api/v10/channels/{os.getenv('DISCORD_CHANNEL_ID')}/messages"
+              requests.post(url, headers={"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN')}"}, json={"content": response_text})
+          else:
+              print("All models failed due to quota limits.")
+              exit(1) # すべて失敗した場合はエラーとして終了
           EOF
 
   # --- ジョブ2：動画生成（手動実行かつタイトルが入力された時のみ実行） ---
   generate_video:
-    # トレンド分析が終わった後に実行
     needs: trend_analysis
-    # 手動実行であり、かつ video_title が空ではない場合のみ動かす
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.video_title != ''
     runs-on: ubuntu-latest
     steps:
