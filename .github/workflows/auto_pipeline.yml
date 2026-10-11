@@ -1,33 +1,79 @@
-name: Discord-to-GitHub-Trigger
+import os
+import sys
+import logging
+import requests
+from google import genai
+from google.genai import types
 
-on:
-  # 1. 毎日 日本時間 朝8:00 に自動実行 (UTC 23:00)
-  schedule:
-    - cron: '0 23 * * *'
-  
-  # 2. 手動でいつでも実行可能
-  workflow_dispatch:
+# --- ロガーの初期化 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s'
+)
+log = logging.getLogger(__name__)
 
-jobs:
-  check-discord:
-    runs-on: ubuntu-latest
-    steps:
-      - name: リポジトリのチェックアウト
-        uses: actions/checkout@v4
+# 環境変数から取得
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-      - name: Pythonのセットアップ
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+def main():
+    log.info("--- YouTube企画案・自動分析＆送信プログラム開始 ---")
 
-      - name: ライブラリのインストール
-        run: pip install requests google-genai
+    if not GEMINI_API_KEY or not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
+        log.error("必要な環境変数（GEMINI_API_KEY, DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID）が設定されていません。")
+        sys.exit(1)
 
-      - name: Discordチェックとワークフロー起動
-        env:
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python check_discord.py
+    # 1. Geminiで最新トレンドを検索・分析して企画案を生成
+    log.info("Geminiが最新のトレンドを検索・分析し、YouTube企画案を作成中...")
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        prompt = """
+あなたはYouTubeの優秀なプロデューサー兼マーケティングコンサルタントです。
+現在のインターネット上のトレンド、直近で話題になっているトピック、あるいは広く関心を集めているテーマをしっかりとリサーチ・分析してください。
+その分析結果を踏まえて、今まさに視聴者を引き込みやすい、バズりやすく人気になりそうなYouTubeの動画企画案を3つ作成してください。
+
+【出力要件】
+- 以下の形式（番号付き）で出力してください。
+1. [企画案1のタイトルと簡単な概要（なぜ今これがウケるのかの分析も少し添える）]
+2. [企画案2のタイトルと簡単な概要（なぜ今これがウケるのかの分析も少し添える）]
+3. [企画案3のタイトルと簡単な概要（なぜ今これがウケるのかの分析も少し添える）]
+- 挨拶は控えめにし、すぐに案がわかるようにしてください。
+- 最後に「どの企画で動画を作成しますか？「1」「2」「3」のいずれかをこのスレッドに返信してください。」と添えてください。
+"""
+        
+        # ★ Google検索ツール（Grounding）を有効化し、リアルタイムのWeb情報を分析させる
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}],
+                temperature=1.0,  # 検索グランディング推奨の設定
+            ),
+        )
+        ideas_text = response.text
+        log.info("最新トレンドの分析および企画案の生成に成功しました。")
+    except Exception as e:
+        log.error(f"Gemini APIでの生成中にエラーが発生しました: {e}")
+        sys.exit(1)
+
+    # 2. Discordへ送信
+    log.info(f"Discordチャンネル ({DISCORD_CHANNEL_ID}) へ送信中...")
+    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
+    headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"content": ideas_text}
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        res.raise_for_status()
+        log.info("Discordへの企画案送信が完了しました！")
+    except Exception as e:
+        log.error(f"Discordへの送信に失敗しました: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
