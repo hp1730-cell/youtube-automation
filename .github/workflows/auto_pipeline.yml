@@ -17,52 +17,50 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+def send_discord_message(text):
+    """Discordへメッセージを送信する"""
+    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
+    headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"content": text}
+    res = requests.post(url, headers=headers, json=payload, timeout=30)
+    res.raise_for_status()
+
 def main():
-    log.info("--- YouTube企画案・市場分析＆自動送信プログラム開始 ---")
+    log.info("--- YouTube企画案・簡略版送信プログラム開始 ---")
 
     if not GEMINI_API_KEY or not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         log.error("必要な環境変数（GEMINI_API_KEY, DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID）が設定されていません。")
         sys.exit(1)
 
-    # 1. Geminiで最新トレンドの検索・分析と企画案の生成
-    log.info("Geminiが最新のトレンドを検索・分析し、企画案と分析結果を構築中...")
+    log.info("Geminiがトレンド分析および企画立案中...")
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # 分析と出力構造を明確にしたプロンプト
+        # プロンプトを「分析は内部でやり、出力は最小限に」と変更
         prompt = """
-あなたはYouTubeの優秀なプロデューサー兼マーケティングコンサルタントです。
-以下の手順に従い、本気でバズるYouTube企画を立案してください。
+あなたはYouTubeの超一流プロデューサーです。
+Google検索を用いて最新トレンドを徹底的に分析した上で、バズる企画を3つ立案してください。
 
-1. 【市場分析・トレンドリサーチ】
-現在のインターネット上のトレンド、直近で話題のニュース、SNSの動向、人々の関心をGoogle検索で徹底的にリサーチし、「今なぜこのテーマが求められているのか」の背景を論理的に分析してください。
+【重要：出力形式】
+詳細な分析プロセスは内部で完結させ、Discordへ送信するため、以下の【出力フォーマット】のみを返してください。余計な挨拶や解説は一切不要です。
 
-2. 【動画企画案の立案】
-上記の分析結果に基づき、視聴者を引き込みやすいYouTubeの動画企画案を3つ作成してください。
+【出力フォーマット】
+📊 【本日のトレンド】
+(現在のトレンドを1行で簡潔に)
 
-【出力フォーマット（必ずこの形式に従ってください）】
-📊 【本日の市場トレンド分析】
-（ここに、現在のトレンドや「なぜ今このテーマなのか」の分析を論理的にまとめてください）
+💡 【企画案】
+1. [タイトル]：[ウケる理由を短く]
+2. [タイトル]：[ウケる理由を短く]
+3. [タイトル]：[ウケる理由を短く]
 
-💡 【YouTube動画企画案（全3選）】
-1. タイトル：[企画タイトル]
-   - 概要：[簡単な概要]
-   - なぜ今これがウケるのか（勝算）：[分析に基づく理由]
-
-2. タイトル：[企画タイトル]
-   - 概要：[簡単な概要]
-   - なぜ今これがウケるのか（勝算）：[分析に基づく理由]
-
-3. タイトル：[企画タイトル]
-   - 概要：[簡単な概要]
-   - なぜ今これがウケるのか（勝算）：[分析に基づく理由]
-
-どの企画で動画を作成しますか？「1」「2」「3」のいずれかをこのスレッドに返信してください。
+作成する企画の番号（1〜3）を返信してください。
 """
         
-        # Google検索グラウンディングを有効化し、リアルタイムデータに基づく分析を行わせる
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-2.0-flash', 
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}],
@@ -70,26 +68,18 @@ def main():
             ),
         )
         ideas_text = response.text
-        log.info("市場分析および企画案の生成に成功しました。")
+        log.info("企画案の生成に成功しました。")
     except Exception as e:
-        log.error(f"Gemini APIでの生成中にエラーが発生しました: {e}")
+        log.error(f"Gemini APIエラー: {e}")
         sys.exit(1)
 
-    # 2. Discordへ送信
-    log.info(f"Discordチャンネル ({DISCORD_CHANNEL_ID}) へ送信中...")
-    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
-    headers = {
-        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {"content": ideas_text}
-
+    # Discordへ送信
+    log.info(f"Discordへ簡略版レポートを送信中...")
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=30)
-        res.raise_for_status()
-        log.info("Discordへの分析レポートおよび企画案の送信が完了しました！")
+        send_discord_message(ideas_text)
+        log.info("Discordへの送信が完了しました！")
     except Exception as e:
-        log.error(f"Discordへの送信に失敗しました: {e}")
+        log.error(f"Discord送信失敗: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
