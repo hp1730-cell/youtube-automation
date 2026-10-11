@@ -1,6 +1,15 @@
 import os
+import sys
+import logging
 import requests
 from datetime import datetime, timezone, timedelta
+
+# --- ロガーの初期化 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+log = logging.getLogger(__name__)
 
 # 環境変数から取得
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -22,7 +31,7 @@ def is_it_eight_am():
 
 def check_discord_replies():
     """Discordの最新メッセージをチェックし、最近（20分以内）の数字のみを返す"""
-    print(f"Checking Discord channel {DISCORD_CHANNEL_ID}...")
+    log.info(f"Checking Discord channel {DISCORD_CHANNEL_ID}...")
     url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages?limit=10"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     
@@ -40,13 +49,13 @@ def check_discord_replies():
             timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
 
             if content in ["1", "2", "3"] and timestamp > time_limit:
-                print(f"有効な最新返信を発見しました: {content} (送信時間: {timestamp})")
+                log.info(f"有効な最新返信を発見しました: {content} (送信時間: {timestamp})")
                 return content
             elif content in ["1", "2", "3"]:
-                print(f"古い返信を発見しましたが、時間切れのため無視します: {content}")
+                log.info(f"古い返信を発見しましたが、時間切れのため無視します: {content}")
 
     except Exception as e:
-        print(f"Discordチェック中にエラーが発生しました: {e}")
+        log.error(f"Discordチェック中にエラーが発生しました: {e}")
     
     return None
 
@@ -71,37 +80,35 @@ def trigger_video_workflow(choice):
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=30)
         if res.status_code == 204:
-            print(f"成功：企画案 {choice} の動画作成ワークフロー（{workflow_id}）を起動しました！")
+            log.info(f"成功：企画案 {choice} の動画作成ワークフロー（{workflow_id}）を起動しました！")
         else:
-            print(f"エラー：GitHub API起動失敗 {res.status_code} - {res.text}")
+            log.error(f"エラー：GitHub API起動失敗 {res.status_code} - {res.text}")
     except Exception as e:
-        print(f"GitHub APIリクエスト中にエラーが発生しました: {e}")
+        log.error(f"GitHub APIリクエスト中にエラーが発生しました: {e}")
 
 if __name__ == "__main__":
-    print("--- Discord返信監視プログラム起動 ---")
+    log.info("--- Discord返信監視プログラム起動 ---")
     
     # 【重要】手動実行(workflow_dispatch)か、自動実行(schedule)かを判別
-    # GitHub Actionsの環境変数 `GITHUB_EVENT_NAME` を使用
     event_name = os.getenv("GITHUB_EVENT_NAME", "manual")
 
     if event_name == "schedule":
         # 自動実行（朝8時）の場合
         if is_it_eight_am():
-            print("自動実行時間（朝8時）です。Discordをチェックします。")
+            log.info("自動実行時間（朝8時）です。Discordをチェックします。")
             choice = check_discord_replies()
             if choice:
                 trigger_video_workflow(choice)
             else:
-                print("条件に合う新しい返信は見つかりませんでした。")
+                log.info("条件に合う新しい返信は見つかりませんでした。")
         else:
-            print("自動実行時間ではありません（朝8時以外）。終了します。")
-            # 終了してもエラーにならないように sys.exit(0)
+            log.info("自動実行時間ではありません（朝8時以外）。終了します。")
             sys.exit(0)
     else:
         # 手動実行（workflow_dispatch）の場合
-        print("手動実行モードです。Discordをチェックします。")
+        log.info("手動実行モードです。Discordをチェックします。")
         choice = check_discord_replies()
         if choice:
             trigger_video_workflow(choice)
         else:
-            print("条件に合う新しい返信は見つかりませんでした。")
+            log.info("条件に合う新しい返信は見つかりませんでした。")
