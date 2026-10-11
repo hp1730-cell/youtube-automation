@@ -1,32 +1,151 @@
-name: Discord-to-GitHub-Trigger
+import os
+import sys
+import logging
+import requests
+from datetime import datetime, timezone, timedelta
+from google import genai  # 最新のGemini SDKを使用
 
-on:
-  # 1. 毎日 日本時間 朝8:00 に自動実行
-  schedule:
-    - cron: '0 23 * * *'  # UTC 23:00 = 日本時間 翌朝 08:00
-  
-  # 2. 手動でいつでも実行可能
-  workflow_dispatch:
+# --- ロガーの初期化 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s'
+)
+log = logging.getLogger(__name__)
 
-jobs:
-  check-discord:
-    runs-on: ubuntu-latest
-    steps:
-      - name: リポジトリのチェックアウト
-        uses: actions/checkout@v4
+# 環境変数から取得
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
+GH_PAT = os.getenv("GH_PAT")
+GH_REPO = os.getenv("GITHUB_REPOSITORY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-      - name: Pythonのセットアップ
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+def send_discord_message(message: str):
+    """Discordチャンネルにメッセージを送信する"""
+    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
+    headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"content": message}
+    
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        res.raise_for_status()
+        log.info("Discordへメッセージを送信しました。")
+    except Exception as e:
+        log.error(f"Discordへのメッセージ送信に失敗しました: {e}")
 
-      - name: ライブラリのインストール
-        run: pip install requests
+def generate_video_ideas_with_gemini() -> str:
+    """Gemini APIを使用してYouTubeの企画案を3つ生成する"""
+    if not GEMINI_API_KEY:
+        log.error("GEMINI_API_KEY が設定されていません。")
+        return "【エラー】Gemini APIキーが設定されていません。"
+    
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        prompt = """
+あなたはYouTubeの優秀なプロデューサー兼マーケティングコンサルタントです。
+現在、視聴者を引き込みやすい、バズりやすく人気になりそうなYouTubeの動画企画案を3つ作成してください。
 
-      - name: Discordチェックとワークフロー起動
-        env:
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python check_discord.py  # ← あなたのPythonファイル名に書き換えてください
+【出力要件】
+- 以下の形式（番号付き）で出力してください。
+- 1. [企画案1のタイトルと簡単な概要]
+- 2. [企画案2のタイトルと簡単な概要]
+- 3. [企画案3のタイトルと簡単な概要]
+- 冒頭や文末の挨拶は控えめにし、すぐに案がわかるようにしてください。
+- 最後に「どの企画で動画を作成しますか？「1」「2」「3」のいずれかをこのスレッドに返信してください。」と添えてください。
+"""
+        
+        # 軽量・高速なモデルを使用
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        return response.text
+        
+    except Exception as e:
+        log.error(f"Gemini APIでの企画案生成中にエラーが発生しました: {e}")
+        return f"【エラー】企画案の生成に失敗しました: {e}"
+
+def check_discord_replies():
+    """Discordの最新メッセージをチェックし、最近（20分以内）の数字のみを返す"""
+    log.info(f"Checking Discord channel {DISCORD_CHANNEL_ID} for replies...")
+    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages?limit=10"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=30)
+        res.raise_for_status()
+        messages = res.json()
+        
+        now = datetime.now(timezone.utc)
+        time_limit = now - timedelta(minutes=20)
+
+        for msg in messages:
+            content = msg.get("content", "").strip()
+            timestamp_str = msg.get("timestamp")
+            timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+
+            if content in ["1", "2", "3"] and timestamp > time_limit:
+                log.info(f"有効な最新返信を発見しました: {content} (送信時間: {timestamp})")
+                return content
+            elif content in ["1", "2", "3"]:
+                log.info(f"古い返信を発見しましたが、時間切れのため無視します: {content}")
+
+    except Exception as e:
+        log.error(f"Discordチェック中にエラーが発生しました: {e}")
+    
+    return None
+
+def trigger_video_workflow(choice):
+    """GitHub APIを使って動画作成ワークフローを起動する"""
+    workflow_id = "youtube_auto.yml" 
+    url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{workflow_id}/dispatches"
+    
+    headers = {
+        "Authorization": f"token {GH_PAT}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    payload = {
+        "ref": "main",
+        "inputs": {
+            "video_title": f"企画案番号{choice}の動画作成",
+            "dry_run": "false"
+        }
+    }
+    
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        if res.status_code == 204:
+            log.info(f"成功：企画案 {choice} の動画作成ワークフロー（{workflow_id}）を起動しました！")
+        else:
+            log.error(f"エラー：GitHub API起動失敗 {res.status_code} - {res.text}")
+    except Exception as e:
+        log.error(f"GitHub APIリクエスト中にエラーが発生しました: {e}")
+
+if __name__ == "__main__":
+    log.info("--- Discord連携プログラム起動 ---")
+    
+    event_name = os.getenv("GITHUB_EVENT_NAME", "manual")
+
+    if event_name == "schedule":
+        # 自動実行（毎朝8時）の場合：
+        # 1. Geminiに案を作らせてDiscordに送信する
+        log.info("自動実行時間（朝8時）：Geminiに企画案を作成させ、Discordに送信します。")
+        ideas_text = generate_video_ideas_with_gemini()
+        send_discord_message(ideas_text)
+        
+        # ※この時点ではまだユーザーが返信する前なので、ここで終了するか、
+        # あるいは別のタイミングで返信をチェックする仕組み（または別ジョブ）にします。
+        log.info("企画案の送信が完了しました。処理を終了します。")
+        sys.exit(0)
+    else:
+        # 手動実行モードの場合：Discordの返信（1, 2, 3）をチェックして動画作成をキックする
+        log.info("手動実行モードです。Discordの返信をチェックします。")
+        choice = check_discord_replies()
+        if choice:
+            trigger_video_workflow(choice)
+        else:
+            log.info("条件に合う新しい返信は見つかりませんでした。")
