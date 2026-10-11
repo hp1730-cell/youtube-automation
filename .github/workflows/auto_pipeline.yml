@@ -35,8 +35,8 @@ jobs:
 
           client = Groq(api_key=os.getenv("GROQ_API_KEY"))
           
-          # 高性能な Llama 3.3 70B を使用（Gemma2-9b-it などに変更可能）
-          model_name = "llama-3.3-70b-versatile"
+          # 高性能な llama-3.1-8b-instant を使用（Gemma2-9b-it などに変更可能）
+          model_name = "llama-3.1-8b-instant"
 
           prompt = """
           あなたはYouTubeプロデューサーです。最新トレンドを分析し、バズる企画を3つ立案してください。
