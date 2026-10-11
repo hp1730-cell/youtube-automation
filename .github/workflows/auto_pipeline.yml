@@ -39,7 +39,6 @@ def main():
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # 分析の根拠を少し出すようにプロンプトを調整
         prompt = """
 あなたはYouTubeの超一流プロデューサー兼マーケティングコンサルタントです。
 Google検索を用いて最新トレンドを徹底的にリサーチし、今最もバズる可能性が高い企画を3つ立案してください。
