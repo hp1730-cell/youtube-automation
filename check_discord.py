@@ -4,7 +4,7 @@ import logging
 import requests
 from datetime import datetime, timezone, timedelta
 
-# --- ロガーの初期化 ---
+# --- ロガーの初期化（NameError対策） ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
@@ -19,14 +19,12 @@ GH_REPO = os.getenv("GITHUB_REPOSITORY")
 
 def is_it_eight_am():
     """現在時刻が日本時間の朝8時台（8:00〜8:59）かどうかを判定"""
-    # 日本標準時 (JST) を取得
     jst = timezone(timedelta(hours=9))
     now_jst = datetime.now(jst)
     
     current_hour = now_jst.hour
     log.info(f"現在の日本時刻: {now_jst.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 8時台であれば True
     return current_hour == 8
 
 def check_discord_replies():
@@ -89,11 +87,9 @@ def trigger_video_workflow(choice):
 if __name__ == "__main__":
     log.info("--- Discord返信監視プログラム起動 ---")
     
-    # 【重要】手動実行(workflow_dispatch)か、自動実行(schedule)かを判別
     event_name = os.getenv("GITHUB_EVENT_NAME", "manual")
 
     if event_name == "schedule":
-        # 自動実行（朝8時）の場合
         if is_it_eight_am():
             log.info("自動実行時間（朝8時）です。Discordをチェックします。")
             choice = check_discord_replies()
@@ -105,7 +101,6 @@ if __name__ == "__main__":
             log.info("自動実行時間ではありません（朝8時以外）。終了します。")
             sys.exit(0)
     else:
-        # 手動実行（workflow_dispatch）の場合
         log.info("手動実行モードです。Discordをチェックします。")
         choice = check_discord_replies()
         if choice:
