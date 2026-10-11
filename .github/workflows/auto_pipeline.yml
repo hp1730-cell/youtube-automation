@@ -18,42 +18,59 @@ DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 def main():
-    log.info("--- YouTube企画案・自動分析＆送信プログラム開始 ---")
+    log.info("--- YouTube企画案・市場分析＆自動送信プログラム開始 ---")
 
     if not GEMINI_API_KEY or not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         log.error("必要な環境変数（GEMINI_API_KEY, DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID）が設定されていません。")
         sys.exit(1)
 
-    # 1. Geminiで最新トレンドを検索・分析して企画案を生成
-    log.info("Geminiが最新のトレンドを検索・分析し、YouTube企画案を作成中...")
+    # 1. Geminiで最新トレンドの検索・分析と企画案の生成
+    log.info("Geminiが最新のトレンドを検索・分析し、企画案と分析結果を構築中...")
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         
+        # 分析と出力構造を明確にしたプロンプト
         prompt = """
 あなたはYouTubeの優秀なプロデューサー兼マーケティングコンサルタントです。
-現在のインターネット上のトレンド、直近で話題になっているトピック、あるいは広く関心を集めているテーマをしっかりとリサーチ・分析してください。
-その分析結果を踏まえて、今まさに視聴者を引き込みやすい、バズりやすく人気になりそうなYouTubeの動画企画案を3つ作成してください。
+以下の手順に従い、本気でバズるYouTube企画を立案してください。
 
-【出力要件】
-- 以下の形式（番号付き）で出力してください。
-1. [企画案1のタイトルと簡単な概要（なぜ今これがウケるのかの分析も少し添える）]
-2. [企画案2のタイトルと簡単な概要（なぜ今これがウケるのかの分析も少し添える）]
-3. [企画案3のタイトルと簡単な概要（なぜ今これがウケるのかの分析も少し添える）]
-- 挨拶は控えめにし、すぐに案がわかるようにしてください。
-- 最後に「どの企画で動画を作成しますか？「1」「2」「3」のいずれかをこのスレッドに返信してください。」と添えてください。
+1. 【市場分析・トレンドリサーチ】
+現在のインターネット上のトレンド、直近で話題のニュース、SNSの動向、人々の関心をGoogle検索で徹底的にリサーチし、「今なぜこのテーマが求められているのか」の背景を論理的に分析してください。
+
+2. 【動画企画案の立案】
+上記の分析結果に基づき、視聴者を引き込みやすいYouTubeの動画企画案を3つ作成してください。
+
+【出力フォーマット（必ずこの形式に従ってください）】
+📊 【本日の市場トレンド分析】
+（ここに、現在のトレンドや「なぜ今このテーマなのか」の分析を論理的にまとめてください）
+
+💡 【YouTube動画企画案（全3選）】
+1. タイトル：[企画タイトル]
+   - 概要：[簡単な概要]
+   - なぜ今これがウケるのか（勝算）：[分析に基づく理由]
+
+2. タイトル：[企画タイトル]
+   - 概要：[簡単な概要]
+   - なぜ今これがウケるのか（勝算）：[分析に基づく理由]
+
+3. タイトル：[企画タイトル]
+   - 概要：[簡単な概要]
+   - なぜ今これがウケるのか（勝算）：[分析に基づく理由]
+
+どの企画で動画を作成しますか？「1」「2」「3」のいずれかをこのスレッドに返信してください。
 """
         
-        # ★ Google検索ツール（Grounding）を有効化し、リアルタイムのWeb情報を分析させる
+        # Google検索グラウンディングを有効化し、リアルタイムデータに基づく分析を行わせる
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}],
-                temperature=1.0,  # 検索グランディング推奨の設定
+                temperature=0.7,
             ),
         )
         ideas_text = response.text
-        log.info("最新トレンドの分析および企画案の生成に成功しました。")
+        log.info("市場分析および企画案の生成に成功しました。")
     except Exception as e:
         log.error(f"Gemini APIでの生成中にエラーが発生しました: {e}")
         sys.exit(1)
@@ -70,7 +87,7 @@ def main():
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=30)
         res.raise_for_status()
-        log.info("Discordへの企画案送信が完了しました！")
+        log.info("Discordへの分析レポートおよび企画案の送信が完了しました！")
     except Exception as e:
         log.error(f"Discordへの送信に失敗しました: {e}")
         sys.exit(1)
