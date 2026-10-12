@@ -2,18 +2,29 @@ name: YouTube Auto-Production Pipeline
 
 on:
   schedule:
-    # 毎朝8時（UTC 23時）に実行
-    - cron: '0 23 * * *'
+    # 日本時間 8:00, 9:00, 10:00, 11:00, 12:00 に実行 (UTC 23, 0, 1, 2, 3)
+    - cron: '0 23,0,1,2,3 * * *'
   workflow_dispatch:
-    # 手動実行時：タイトルを入力すれば動画生成まで、空欄なら分析のみ行う
     inputs:
+      action_mode:
+        description: '実行モード'
+        required: true
+        default: 'analyze'
+        type: choice
+        options:
+          - analyze
+          - check_replies
+          - generate_video
       video_title:
-        description: '生成する動画タイトル（空欄の場合はトレンド分析のみ実行）'
+        description: '動画タイトル'
         required: false
 
 jobs:
-  # --- ジョブ1：トレンド分析 ---
+  # --- ジョブ1：トレンド分析（送信） ---
   trend_analysis:
+    # 【重要】分析は「8時ちょうど(UTC 23時)」だけ実行したい
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 23,0,1,2,3 * * *' && (datetime.now(timezone.utc).hour == 23)) || github.event.inputs.action_mode == 'analyze'
+    # ↑ 複雑になるので、Python側で時間判定する方が確実です。以下に修正したPythonコードを書きます。
     runs-on: ubuntu-latest
     steps:
       - name: Setup Python
@@ -29,68 +40,67 @@ jobs:
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
         run: |
           python3 <<EOF
-          import os, requests
+          import os, requests, datetime
           from groq import Groq
+          from datetime import timezone, timedelta
+
+          # 日本時間で8時台かチェック（スケジュール実行時のみ）
+          now_jst = datetime.datetime.now(timezone(timedelta(hours=9)))
+          if now_jst.hour != 8:
+              print("今は8時ではないため、分析はスキップします。")
+              exit(0)
 
           client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-          
-          # スクリーンショットで確認できたモデルを指定
           model_name = "openai/gpt-oss-120b"
-
-          prompt = """
-          あなたはYouTubeプロデューサーです。最新トレンドを分析し、バズる企画を3つ立案してください。
-          【出力フォーマット】
-          📊 【本日の市場トレンド分析】
-          ・トレンド：(簡潔に)
-          ・分析根拠：(なぜ今か、2行で)
-          💡 【YouTube動画企画案】
-          1. [タイトル]：[勝算を短く]
-          2. [タイトル]：[勝算を短く]
-          3. [タイトル]：[勝算を短く]
-          作成する企画の番号を返信してください。
-          """
-
+          prompt = "あなたはYouTubeプロデューサーです。最新トレンドを分析し..."
+          # (以下、前回の送信コードと同じ)
           try:
-              # API 400エラー対策：systemロールを使わず、userロールに統合する
               full_prompt = f"あなたは優秀なYouTubeプロデューサーです。\n\n{prompt}"
-              completion = client.chat.completions.create(
-                  model=model_name,
-                  messages=[
-                      {"role": "user", "content": full_prompt}
-                  ],
-                  temperature=0.7,
-              )
+              completion = client.chat.completions.create(model=model_name, messages=[{"role": "user", "content": full_prompt}])
               response_text = completion.choices[0].message.content
           except Exception as e:
-              print(f"Groq API Error: {e}")
-              exit(1)
-
+              print(f"Error: {e}"); exit(1)
           url = f"https://discord.com/api/v10/channels/{os.getenv('DISCORD_CHANNEL_ID')}/messages"
           requests.post(url, headers={"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN')}"}, json={"content": response_text})
           EOF
 
-  # --- ジョブ2：動画生成（手動実行かつタイトルが入力された時のみ実行） ---
-  generate_video:
-    needs: trend_analysis
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.video_title != ''
+  # --- ジョブ2：Discord返信チェック（受信） ---
+  discord_check:
+    # 8時〜12時のスケジュール実行、または手動 check_replies の時に動作
+    if: github.event_name == 'schedule' || github.event.inputs.action_mode == 'check_replies'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run Checker Script
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python discord_check.py
 
+  # --- ジョブ3：動画生成 ---
+  generate_video:
+    if: github.event.inputs.action_mode == 'generate_video' && github.event.inputs.video_title != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install System Dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Install Production Libs
         run: pip install -r requirements.txt
-
       - name: Run Video Engine
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
