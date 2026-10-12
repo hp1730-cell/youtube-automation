@@ -35,8 +35,8 @@ jobs:
 
           client = Groq(api_key=os.getenv("GROQ_API_KEY"))
           
-          # 高性能な meta-llama/llama-prompt-guard-2-86m を使用
-          model_name = "meta-llama/llama-prompt-guard-2-86m"
+          # 高性能な openai/gpt-oss-120b を使用
+          model_name = "openai/gpt-oss-120b"
 
           prompt = """
           あなたはYouTubeプロデューサーです。最新トレンドを分析し、バズる企画を3つ立案してください。
