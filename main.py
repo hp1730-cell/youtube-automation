@@ -10,7 +10,6 @@ import random
 from pathlib import Path
 from datetime import datetime
 
-# edge-tts / openai を削除し、gTTS を導入
 from gtts import gTTS
 from json_repair import repair_json
 from PIL import Image
@@ -105,21 +104,29 @@ def get_field_flexible(data: dict, potential_keys: list, default_val: str = "") 
 
 def run_phase_1() -> dict:
     log.info("=== [Phase 1] 階層型ストーリーボード生成開始 ===")
-    prompt_outline = f"Theme: {INPUT_TITLE}/Genre: {INPUT_GENRE}/Tone: {INPUT_TONE}. Create an 8-min YouTube outline in JSON: {{ 'chapters': [ {{ 'title': '...', 'duration': 60, 'goal': '...' }} ] }}"
+    # プロンプトをより厳格に変更（JSONキーを強制）
+    prompt_outline = f"Theme: {INPUT_TITLE}/Genre: {INPUT_GENRE}/Tone: {INPUT_TONE}. Create a detailed 8-min YouTube outline. Output ONLY JSON format: {{ 'chapters': [ {{ 'title': 'string', 'duration': number, 'goal': 'string' }} ] }}"
     raw_outline = call_gemini(prompt_outline)
     outline_data = safe_parse_json(raw_outline, "chapters")
     
     chapters = flatten_list(outline_data.get("chapters", []))
+    if not chapters:
+        log.warning("章が生成されなかったため、デフォルト章を作成します。")
+        chapters = [{"title": "Introduction", "duration": 60, "goal": "Introduce the theme"}]
     
     master_storyboard = {"video_title": INPUT_TITLE, "chapters": []}
     for chapter in chapters:
         chapter_title = get_field_flexible(chapter, ["title", "chapter_title", "name"], "Unknown Chapter")
         log.info(f"章 '{chapter_title}' の詳細化中...")
-        prompt_detail = f"Chapter: {chapter_title}/Goal: {chapter.get('goal', '')}. Break into 10-15 scenes. Output JSON: {{ 'scenes': [ {{ 'narration': '...', 'visual_prompts': ['...', '...', '...'], 'search_keywords': ['...'], 'camera_motion': 'zoom_in' }} ] }}"
+        # シーン構成にプロンプトを必須とするよう指示
+        prompt_detail = f"Chapter: {chapter_title}/Goal: {chapter.get('goal', '')}. Break into 10-15 scenes. Output ONLY JSON format: {{ 'scenes': [ {{ 'narration': 'string', 'visual_prompts': ['string', 'string', 'string'], 'search_keywords': ['string'], 'camera_motion': 'zoom_in' }} ] }}"
         raw_detail = call_gemini(prompt_detail)
         scene_data = safe_parse_json(raw_detail, "scenes")
         
         scenes = flatten_list(scene_data.get("scenes", []))
+        if not scenes:
+            log.warning(f"章 {chapter_title} のシーンが生成されませんでした。デフォルトシーンを挿入します。")
+            scenes = [{"narration": "続きを詳しく見ていきましょう。", "visual_prompts": ["Cinematic background"], "search_keywords": ["nature"], "camera_motion": "zoom_in"}]
         
         chapter_data = {
             "chapter_title": chapter_title,
@@ -128,7 +135,7 @@ def run_phase_1() -> dict:
             "scenes": scenes
         }
         master_storyboard["chapters"].append(chapter_data)
-        time.sleep(random.uniform(10, 20))
+        time.sleep(random.uniform(5, 10))
     with open(MASTER_STORYBOARD_PATH, "w", encoding="utf-8") as f:
         json.dump(master_storyboard, f, indent=2, ensure_ascii=False)
     log.info(f"=== [Phase 1] 完了! ===")
@@ -160,23 +167,20 @@ class AssetManager:
                 
                 temp_path = self.audio_dir / f"s_{idx}_{s_idx}.mp3"
                 try:
-                    # --- gTTS への書き換え (完全無料・APIキー不要) ---
                     tts = gTTS(text=text, lang='ja')
                     tts.save(str(temp_path))
-                    # --------------------------------------------
-                    
                     clip = AudioFileClip(str(temp_path))
                     duration = clip.duration
                 except Exception as e:
-                    log.error(f"音声生成失敗 (Scene {idx}_{s_idx}): {e}. 無音として扱います。")
+                    log.error(f"音声生成失敗 (Scene {idx}_{s_idx}): {e}")
                     duration = 3.0
                     clip = None
 
                 timeline.append({
                     "start": current_time, "end": current_time + duration,
                     "duration": duration, "narration": text,
-                    "visual_prompts": scene.get("visual_prompts", []),
-                    "search_keywords": scene.get("search_keywords", []),
+                    "visual_prompts": scene.get("visual_prompts", ["Cinematic background"]), # デフォルト追加
+                    "search_keywords": scene.get("search_keywords", ["nature"]), # デフォルト追加
                     "camera_motion": scene.get("camera_motion", "zoom_in"),
                     "audio_clip": clip
                 })
@@ -199,8 +203,13 @@ class AssetManager:
         for idx, t in enumerate(timeline):
             prompts = t["visual_prompts"]
             keywords = t["search_keywords"]
-            for p_idx, prompt in enumerate(prompts):
-                img_path = await self._get_image(prompt, keywords[p_idx % len(keywords)], idx, p_idx)
+            if not prompts: prompts = ["Cinematic background"]
+            if not keywords: keywords = ["nature"]
+            
+            for p_idx in range(3): # 強制的に3枚生成
+                prompt = prompts[p_idx % len(prompts)]
+                kw = keywords[p_idx % len(keywords)]
+                img_path = await self._get_image(prompt, kw, idx, p_idx)
                 t[f"img_{p_idx}"] = img_path
 
     async def _get_image(self, prompt: str, kw: str, s_idx: int, i_idx: int) -> str:
@@ -214,7 +223,7 @@ class AssetManager:
                     target.write_bytes(res.content)
                     return str(target)
             except: pass
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
         if PIXABAY_API_KEY:
             try:
                 res = requests.get(f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&q={requests.utils.quote(kw)}&image_type=photo&per_page=3")
@@ -240,7 +249,11 @@ class AssetManager:
                 clip = self._apply_motion(clip, t["camera_motion"], sub_dur)
                 if i > 0: clip = clip.with_effects([vfx.CrossFadeIn(0.5)])
                 sub_clips.append(clip)
-            if not sub_clips: continue
+            
+            if not sub_clips:
+                log.warning(f"シーン {idx} にクリップがないためスキップします。")
+                continue
+                
             combined = concatenate_videoclips(sub_clips, method="compose")
             try:
                 txt = (TextClip(text=t["narration"], font="Arial-Bold", font_size=40, 
@@ -251,6 +264,10 @@ class AssetManager:
             except:
                 final_s = combined
             scene_clips.append(final_s)
+            
+        if not scene_clips:
+            raise RuntimeError("有効なビデオクリップが一つも生成されませんでした。AIの生成結果を確認してください。")
+            
         final_v = concatenate_videoclips(scene_clips, method="compose")
         final_v = final_v.with_audio(AudioFileClip(audio_path))
         out = WORK / "final.mp4"
