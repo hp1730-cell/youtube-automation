@@ -1,5 +1,5 @@
 duckduckgo_search
-edge-tts @ latest
+openai
 edge-tts
 requests
 trafilatura
