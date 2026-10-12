@@ -12,7 +12,7 @@ on:
         required: false
 
 jobs:
-  # --- ジョブ1：トレンド分析（Groqへ完全移行） ---
+  # --- ジョブ1：トレンド分析 ---
   trend_analysis:
     runs-on: ubuntu-latest
     steps:
@@ -21,7 +21,6 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install Analysis Libs
-        # google-genaiを削除し、groqをインストール
         run: pip install groq requests
       - name: Analyze and Notify
         env:
@@ -35,7 +34,7 @@ jobs:
 
           client = Groq(api_key=os.getenv("GROQ_API_KEY"))
           
-          # 高性能な openai/gpt-oss-120b を使用
+          # スクリーンショットで確認できたモデルを指定
           model_name = "openai/gpt-oss-120b"
 
           prompt = """
@@ -52,11 +51,12 @@ jobs:
           """
 
           try:
+              # API 400エラー対策：systemロールを使わず、userロールに統合する
+              full_prompt = f"あなたは優秀なYouTubeプロデューサーです。\n\n{prompt}"
               completion = client.chat.completions.create(
                   model=model_name,
                   messages=[
-                      {"role": "system", "content": "あなたは優秀なYouTubeプロデューサーです。"},
-                      {"role": "user", "content": prompt}
+                      {"role": "user", "content": full_prompt}
                   ],
                   temperature=0.7,
               )
@@ -93,7 +93,6 @@ jobs:
 
       - name: Run Video Engine
         env:
-          # main.py側でもGroqを使うように修正が必要です
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
