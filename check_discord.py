@@ -4,7 +4,7 @@ import logging
 import requests
 from datetime import datetime, timezone, timedelta
 
-# --- ロガーの初期化（NameError対策） ---
+# --- ロガーの初期化 ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
@@ -17,18 +17,19 @@ DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
 GH_PAT = os.getenv("GH_PAT")
 GH_REPO = os.getenv("GITHUB_REPOSITORY")
 
-def is_it_eight_am():
-    """現在時刻が日本時間の朝8時台（8:00〜8:59）かどうかを判定"""
+def is_within_monitoring_window():
+    """現在時刻が日本時間の朝8時〜12時台かどうかを判定"""
     jst = timezone(timedelta(hours=9))
     now_jst = datetime.now(jst)
     
     current_hour = now_jst.hour
     log.info(f"現在の日本時刻: {now_jst.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    return current_hour == 8
+    # 8, 9, 10, 11, 12時であればTrueを返す
+    return 8 <= current_hour <= 12
 
 def check_discord_replies():
-    """Discordの最新メッセージをチェックし、最近（20分以内）の数字のみを返す"""
+    """Discordの最新メッセージをチェックし、最近（70分以内）の数字のみを返す"""
     log.info(f"Checking Discord channel {DISCORD_CHANNEL_ID}...")
     url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages?limit=10"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
@@ -39,7 +40,8 @@ def check_discord_replies():
         messages = res.json()
         
         now = datetime.now(timezone.utc)
-        time_limit = now - timedelta(minutes=20)
+        # 【修正】1時間おきの実行に合わせ、判定時間を70分に延長
+        time_limit = now - timedelta(minutes=70)
 
         for msg in messages:
             content = msg.get("content", "").strip()
@@ -59,7 +61,8 @@ def check_discord_replies():
 
 def trigger_video_workflow(choice):
     """GitHub APIを使って動画作成ワークフローを起動する"""
-    workflow_id = "youtube_auto.yml" 
+    # 【注意】YAMLファイル名が auto_pipeline.yml の場合はここを書き換えてください
+    workflow_id = "auto_pipeline.yml" 
     url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{workflow_id}/dispatches"
     
     headers = {
@@ -70,8 +73,8 @@ def trigger_video_workflow(choice):
     payload = {
         "ref": "main",
         "inputs": {
-            "video_title": f"企画案番号{choice}の動画作成",
-            "dry_run": "false"
+            "action_mode": "generate_video", # 統合版YAMLのモード指定に合わせる
+            "video_title": f"企画案番号{choice}の動画作成"
         }
     }
     
@@ -90,15 +93,16 @@ if __name__ == "__main__":
     event_name = os.getenv("GITHUB_EVENT_NAME", "manual")
 
     if event_name == "schedule":
-        if is_it_eight_am():
-            log.info("自動実行時間（朝8時）です。Discordをチェックします。")
+        # 【修正】8時だけでなく、8時〜12時の間であれば動作するように変更
+        if is_within_monitoring_window():
+            log.info("監視時間内（8時〜12時）です。Discordをチェックします。")
             choice = check_discord_replies()
             if choice:
                 trigger_video_workflow(choice)
             else:
                 log.info("条件に合う新しい返信は見つかりませんでした。")
         else:
-            log.info("自動実行時間ではありません（朝8時以外）。終了します。")
+            log.info("監視時間外（8時〜12時以外）です。終了します。")
             sys.exit(0)
     else:
         log.info("手動実行モードです。Discordをチェックします。")
