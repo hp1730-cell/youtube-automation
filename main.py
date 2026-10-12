@@ -10,8 +10,8 @@ import random
 from pathlib import Path
 from datetime import datetime
 
-# edge_tts を削除し、openai を導入
-from openai import OpenAI
+# edge-tts / openai を削除し、gTTS を導入
+from gtts import gTTS
 from json_repair import repair_json
 from PIL import Image
 from moviepy import (
@@ -30,15 +30,10 @@ log = logging.getLogger("YouTubeAuto")
 
 WORK = Path(os.getenv("WORK_DIR", "work"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # 追加
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 INPUT_TITLE = os.getenv("INPUT_VIDEO_TITLE", "自動判定")
 INPUT_GENRE = os.getenv("INPUT_VIDEO_GENRE", "自動判定")
 INPUT_TONE = os.getenv("INPUT_VIDEO_TONE", "わかりやすく、最後まで見たくなる雰囲気")
-
-# OpenAIの声の選択肢: alloy, echo, fable, onyx, nova, shimmer
-# 日本語に合うNova（女性風）やAlloy（中性的）がおすすめです
-OPENAI_VOICE = os.getenv("OPENAI_VOICE", "nova") 
 
 STYLE_ANCHOR = "High-end cinematic anime style, highly detailed digital illustration, masterpiece, 8k, vivid colors, expressive character emotions"
 MASTER_STORYBOARD_PATH = WORK / "master_storyboard.json"
@@ -148,18 +143,12 @@ class AssetManager:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.audio_dir = WORK / "temp_audio"
         self.audio_dir.mkdir(parents=True, exist_ok=True)
-        
-        # OpenAI Client 初期化
-        if not OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY が設定されていません。音声生成に必要です。")
-        self.openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
     async def generate_all_audio(self):
-        log.info("【音声】OpenAI TTS ナレーション生成中...")
+        log.info("【音声】gTTS 完全無料ナレーション生成中...")
         timeline = []
         current_time = 0.0
         audio_clips = []
-        
         for idx, chap in enumerate(self.storyboard["chapters"]):
             for s_idx, scene in enumerate(chap["scenes"]):
                 if isinstance(scene, list):
@@ -171,14 +160,10 @@ class AssetManager:
                 
                 temp_path = self.audio_dir / f"s_{idx}_{s_idx}.mp3"
                 try:
-                    # --- OpenAI TTS への書き換え ---
-                    response = self.openai_client.audio.speech.create(
-                        model="tts-1", # または tts-1-hd (高品質)
-                        voice=OPENAI_VOICE,
-                        input=text
-                    )
-                    response.stream_to_file(str(temp_path))
-                    # ----------------------------
+                    # --- gTTS への書き換え (完全無料・APIキー不要) ---
+                    tts = gTTS(text=text, lang='ja')
+                    tts.save(str(temp_path))
+                    # --------------------------------------------
                     
                     clip = AudioFileClip(str(temp_path))
                     duration = clip.duration
