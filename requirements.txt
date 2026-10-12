@@ -1,6 +1,6 @@
 duckduckgo_search
 openai
-edge-tts
+gTTS
 requests
 trafilatura
 google-api-python-client
