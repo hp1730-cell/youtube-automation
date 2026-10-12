@@ -7,23 +7,22 @@ on:
   workflow_dispatch:
     inputs:
       action_mode:
-        description: '実行するモードを選択してください'
+        description: '実行モード'
         required: true
         default: 'analyze'
         type: choice
         options:
-          - analyze         # トレンド分析
-          - check_replies   # Discord返信チェック（受信）
-          - generate_video  # 直接動画生成
+          - analyze
+          - check_replies
+          - generate_video
       video_title:
-        description: '動画タイトル（generate_video選択時のみ使用）'
+        description: '動画タイトル'
         required: false
 
 jobs:
   # --- ジョブ1：トレンド分析（送信） ---
   trend_analysis:
-    # 【修正】ここでdatetimeを使わず、シンプルに起動条件だけを指定
-    if: github.event.inputs.action_mode == 'analyze' || github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event.inputs.action_mode == 'analyze'
     runs-on: ubuntu-latest
     steps:
       - name: Setup Python
@@ -43,33 +42,15 @@ jobs:
           from groq import Groq
           from datetime import timezone, timedelta
 
-          # --- 【ここで時間を判定】 ---
-          # 日本時間で現在時刻を取得
           now_jst = datetime.datetime.now(timezone(timedelta(hours=9)))
-          
-          # 手動実行(workflow_dispatch)の場合は、時間に関わらず実行する
-          # スケジュール実行(schedule)の場合は、8時台のみ実行する
           is_manual = os.getenv("GITHUB_EVENT_NAME") != "schedule"
           if not is_manual and now_jst.hour != 8:
-              print(f"現在は日本時間 {now_jst.hour}時です。分析は8時のみ実行するためスキップします。")
+              print(f"現在 {now_jst.hour}時です。分析は8時のみ実行します。")
               exit(0)
 
-          print("分析処理を開始します...")
           client = Groq(api_key=os.getenv("GROQ_API_KEY"))
           model_name = "openai/gpt-oss-120b"
-          prompt = """
-          あなたはYouTubeプロデューサーです。最新トレンドを分析し、バズる企画を3つ立案してください。
-          【出力フォーマット】
-          📊 【本日の市場トレンド分析】
-          ・トレンド：(簡潔に)
-          ・分析根拠：(なぜ今か、2行で)
-          💡 【YouTube動画企画案】
-          1. [タイトル]：[勝算を短く]
-          2. [タイトル]：[勝算を短く]
-          3. [タイトル]：[勝算を短く]
-          作成する企画の番号を返信してください。
-          """
-
+          prompt = "あなたはYouTubeプロデューサーです。最新トレンドを分析し、バズる企画を3つ立案してください。【出力フォーマット】..."
           try:
               full_prompt = f"あなたは優秀なYouTubeプロデューサーです。\n\n{prompt}"
               completion = client.chat.completions.create(
@@ -79,16 +60,14 @@ jobs:
               )
               response_text = completion.choices[0].message.content
           except Exception as e:
-              print(f"Groq API Error: {e}")
-              exit(1)
-
+              print(f"Groq Error: {e}"); exit(1)
           url = f"https://discord.com/api/v10/channels/{os.getenv('DISCORD_CHANNEL_ID')}/messages"
           requests.post(url, headers={"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN')}"}, json={"content": response_text})
           EOF
 
   # --- ジョブ2：Discord返信チェック（受信） ---
   discord_check:
-    if: github.event.inputs.action_mode == 'check_replies' || github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event.inputs.action_mode == 'check_replies'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -109,7 +88,7 @@ jobs:
 
   # --- ジョブ3：動画生成（実行） ---
   generate_video:
-    if: github.event.inputs.action_mode == 'generate_video' && github.event.inputs.video_title != ''
+    if: github.event.inputs.action_mode == 'generate_video'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -128,4 +107,5 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
-          WO
+          WORK_DIR: "work"
+        run: python main.py
