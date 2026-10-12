@@ -109,3 +109,11 @@ jobs:
           INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
           WORK_DIR: "work"
         run: python main.py
+
+      # --- 【ここを追加しました！】生成された動画を保存してダウンロード可能にする ---
+      - name: Upload Final Video
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-youtube-video
+          path: work/final.mp4
