@@ -84,7 +84,7 @@ jobs:
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python discord_check.py
+        run: python check_discord.py
 
   # --- ジョブ3：動画生成（実行） ---
   generate_video:
