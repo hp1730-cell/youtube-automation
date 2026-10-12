@@ -1,4 +1,5 @@
 duckduckgo_search
+edge-tts @ latest
 edge-tts
 requests
 trafilatura
