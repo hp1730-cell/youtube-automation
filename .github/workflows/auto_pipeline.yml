@@ -1,9 +1,17 @@
 name: YouTube Auto-Production Pipeline
 
+# ─────────────────────────────────────────────────────────────
+# ・企画案の送信 : 毎朝 JST 8:07 ごろ（cron は遅れることがあるため "分" を 0 からずらしています）
+# ・返信チェック : JST 8:23〜12:23 ごろ 毎時
+# ・動画生成     : 返信チェックが workflow_dispatch で起動（手動実行も可）
+# ※ ジョブの振り分けは「時刻」ではなく「どの cron で起動されたか」で判定するため、
+#   GitHub 側の実行遅延があってもスキップされません。
+# ※ cron 文字列を変更するときは、下の各ジョブの if 条件も同じ文字列に揃えてください。
+# ─────────────────────────────────────────────────────────────
 on:
   schedule:
-    # 日本時間 8:00, 9:00, 10:00, 11:00, 12:00 に実行 (UTC 23, 0, 1, 2, 3)
-    - cron: '0 23,0,1,2,3 * * *'
+    - cron: '7 23 * * *'            # 企画案送信 (UTC 23:07 = JST 8:07)
+    - cron: '23 23,0,1,2,3 * * *'   # 返信チェック (JST 8:23, 9:23, 10:23, 11:23, 12:23)
   workflow_dispatch:
     inputs:
       action_mode:
@@ -16,104 +24,129 @@ on:
           - check_replies
           - generate_video
       video_title:
-        description: '動画タイトル'
+        description: '動画のテーマ（generate_video を手動実行するとき用）'
         required: false
+        type: string
+      plan_text:
+        description: '企画案の本文（返信チェックから自動で渡されます）'
+        required: false
+        type: string
+      skip_upload:
+        description: 'YouTube へのアップロードを行わない'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 jobs:
-  # --- ジョブ1：トレンド分析（送信） ---
+  # --- ジョブ1：トレンド分析 → Discord に企画案を送信 ---
   trend_analysis:
-    if: github.event_name == 'schedule' || github.event.inputs.action_mode == 'analyze'
+    if: github.event.schedule == '7 23 * * *' || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'analyze')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install Analysis Libs
-        run: pip install groq requests
-      - name: Analyze and Notify
+      - name: Install libs
+        run: pip install groq requests json-repair
+      - name: Analyze and notify
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}      # 任意（急上昇動画の取得に使用）
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-        run: |
-          python3 <<EOF
-          import os, requests, datetime
-          from groq import Groq
-          from datetime import timezone, timedelta
+          CHANNEL_THEME: ${{ vars.CHANNEL_THEME }}             # 任意（例: 雑学・歴史の解説）
+        run: python analyze.py
 
-          now_jst = datetime.datetime.now(timezone(timedelta(hours=9)))
-          is_manual = os.getenv("GITHUB_EVENT_NAME") != "schedule"
-          if not is_manual and now_jst.hour != 8:
-              print(f"現在 {now_jst.hour}時です。分析は8時のみ実行します。")
-              exit(0)
-
-          client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-          model_name = "openai/gpt-oss-120b"
-          prompt = "あなたはYouTubeプロデューサーです。最新トレンドを分析し、バズる企画を3つ立案してください。【出力フォーマット】..."
-          try:
-              full_prompt = f"あなたは優秀なYouTubeプロデューサーです。\n\n{prompt}"
-              completion = client.chat.completions.create(
-                  model=model_name,
-                  messages=[{"role": "user", "content": full_prompt}],
-                  temperature=0.7,
-              )
-              response_text = completion.choices[0].message.content
-          except Exception as e:
-              print(f"Groq Error: {e}"); exit(1)
-          url = f"https://discord.com/api/v10/channels/{os.getenv('DISCORD_CHANNEL_ID')}/messages"
-          requests.post(url, headers={"Authorization": f"Bot {os.getenv('DISCORD_BOT_TOKEN')}"}, json={"content": response_text})
-          EOF
-
-  # --- ジョブ2：Discord返信チェック（受信） ---
+  # --- ジョブ2：Discord の返信チェック → 動画生成を起動 ---
   discord_check:
-    if: github.event_name == 'schedule' || github.event.inputs.action_mode == 'check_replies'
+    if: github.event.schedule == '23 23,0,1,2,3 * * *' || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'check_replies')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
+      - name: Install libs
         run: pip install requests
-      - name: Run Checker Script
+      - name: Check replies
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_ALLOWED_USER_ID: ${{ vars.DISCORD_ALLOWED_USER_ID }}  # 任意（自分の返信だけ受け付ける）
           GH_PAT: ${{ secrets.GH_PAT }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_FILE: auto_pipeline.yml   # このファイルの名前と一致させる
         run: python check_discord.py
 
-  # --- ジョブ3：動画生成（実行） ---
+  # --- ジョブ3：動画生成 → 非公開アップロード ---
   generate_video:
-    if: github.event.inputs.action_mode == 'generate_video'
+    if: github.event_name == 'workflow_dispatch' && inputs.action_mode == 'generate_video'
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+    concurrency:
+      group: generate-video
+      cancel-in-progress: false
+    services:
+      voicevox:
+        image: voicevox/voicevox_engine:cpu-latest
+        ports:
+          - 50021:50021
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install System Dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install Production Libs
+          cache: pip
+
+      - name: Install Python libs
         run: pip install -r requirements.txt
-      - name: Run Video Engine
+
+      - name: Generate video
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-          INPUT_VIDEO_TITLE: ${{ github.event.inputs.video_title }}
-          WORK_DIR: "work"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}       # 任意（画像生成失敗時の予備）
+          POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }} # 任意（画像生成の制限緩和）
+          CHANNEL_THEME: ${{ vars.CHANNEL_THEME }}
+          VOICEVOX_SPEAKER: ${{ vars.VOICEVOX_SPEAKER }}        # 任意（話者ID。未設定なら 3=ずんだもん）
+          INPUT_VIDEO_TITLE: ${{ inputs.video_title }}
+          INPUT_PLAN_TEXT: ${{ inputs.plan_text }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}   # 台本完成・失敗の通知用
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          VOICEVOX_URL: http://localhost:50021
+          WORK_DIR: work
         run: python main.py
 
-      # --- 【ここを追加しました！】生成された動画を保存してダウンロード可能にする ---
-      - name: Upload Final Video
+      - name: Save outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: final-youtube-video
-          path: work/final.mp4
+          name: youtube-video
+          path: |
+            work/final.mp4
+            work/thumbnail.jpg
+            work/metadata.json
+            work/script.json
+            work/research.md
+            work/review.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload to YouTube (private)
+        if: success() && inputs.skip_upload != true
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          WORK_DIR: work
+        run: python upload_youtube.py
