@@ -85,23 +85,43 @@ prepare_character.py   ← シートから透過PNGを作り直すスクリプ�
 |---|---|---|
 | `CHANNEL_THEME` | `日本の歴史と雑学をアニメ調で解説` | チャンネルの方向性。企画と台本の両方に反映されます。**設定を強く推奨** |
 | `DISCORD_ALLOWED_USER_ID` | `123456789012345678` | 自分の返信だけを受け付ける |
-| `VOICEVOX_SPEAKER` | `3` | VOICEVOX の話者ID（3=ずんだもん、2=四国めたん、13=青山龍星 など） |
+| `VOICEVOX_SPEAKER` | `12` | VOICEVOX の話者ID。未設定なら 12=白上虎太郎（11=玄野武宏、13=青山龍星、3=ずんだもん など） |
 
 ## 4. YouTube アップロードの準備（1回だけ）
 
-1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成
-2. **YouTube Data API v3** を有効化
-3. **OAuth 同意画面**を作成（User Type: 外部）し、スコープに `youtube.upload` を追加
-4. **公開ステータスを「本番環境」にする**
+ブラウザだけで完結する方法です（PC に Python を入れる必要はありません）。
+
+### A. Google Cloud の設定
+1. [Google Cloud Console](https://console.cloud.google.com/) にログインし、上部のプロジェクト選択から **新しいプロジェクト** を作成
+2. 「APIとサービス」→「ライブラリ」で **YouTube Data API v3** を検索して **有効にする**
+3. 「APIとサービス」→「OAuth 同意画面」（または「Google Auth Platform」）を開き、アプリ名・メールを入れて作成（対象: **外部**）
+4. 「データアクセス」（スコープ）で `https://www.googleapis.com/auth/youtube.upload` を追加
+5. 「対象」（公開ステータス）で **本番環境に公開** を押す
    ※「テスト」のままだと**リフレッシュトークンが7日で失効**し、アップロードが止まります。
-   本番環境にしても審査は不要です（自分で使うだけなら「未確認のアプリ」の警告を進めればOK）。
-5. **認証情報 → OAuth クライアント ID**（種類: デスクトップアプリ）を作成し、JSON をダウンロード
-6. 自分の PC で実行：
-   ```
-   pip install google-auth-oauthlib
-   python get_refresh_token.py
-   ```
-7. 表示された3つの値を Secrets に登録
+   審査は不要です（自分で使うだけなら「未確認のアプリ」の警告を進めれば使えます）。
+6. 「認証情報」→「認証情報を作成」→「OAuth クライアント ID」
+   - アプリケーションの種類: **ウェブ アプリケーション**
+   - 承認済みのリダイレクト URI に `https://developers.google.com/oauthplayground` を追加
+   - 作成後に表示される **クライアント ID** と **クライアント シークレット** を控える
+
+### B. リフレッシュトークンの取得（OAuth 2.0 Playground）
+1. [OAuth 2.0 Playground](https://developers.google.com/oauthplayground) を開く
+2. 右上の歯車 ⚙ → **Use your own OAuth credentials** にチェックし、A-6 のクライアント ID とシークレットを入力
+3. 左の「Input your own scopes」に `https://www.googleapis.com/auth/youtube.upload` を入れて **Authorize APIs**
+4. 動画を投稿したいチャンネルの Google アカウントを選ぶ（「未確認のアプリ」と出たら「詳細」→「（安全ではないページ）に移動」）
+5. Step 2 で **Exchange authorization code for tokens** を押し、表示された **Refresh token** を控える
+6. 使い終わったら歯車の設定は戻してかまいません（トークンは有効なままです）
+
+### C. GitHub に登録
+Settings → Secrets and variables → Actions → **Secrets** タブに、次の3つを登録します。
+
+| 名前 | 値 |
+|---|---|
+| `YT_CLIENT_ID` | A-6 のクライアント ID |
+| `YT_CLIENT_SECRET` | A-6 のクライアント シークレット |
+| `YT_REFRESH_TOKEN` | B-5 のリフレッシュトークン |
+
+（Python が使える場合は、デスクトップアプリ用のクライアントを作って `python get_refresh_token.py` で取得しても同じです。）
 
 > 審査を受けていないプロジェクトからアップロードした動画は、API 側で非公開に固定されます。
 > このパイプラインは最初から非公開で投稿するため問題ありません。YouTube Studio から手動で公開できます。
@@ -150,8 +170,8 @@ VOICEVOX が使えず gTTS になった場合は、声の大きさから口の�
 
 ### 素材を差し替えるとき
 
-- 表情：白背景・2×2（左上=通常、右上=笑顔、左下=驚き、右下=考え中）→ `assets/character_sheet.png`
-- 口パク：白背景・3×2（上段=あ・い・う、下段=え・お・閉じ）→ `assets/mouth_sheet.png`
+- 表情：白背景または透過背景・2×2（左上=通常、右上=笑顔、左下=驚き、右下=考え中）→ `assets/character_sheet.png`
+- 口パク：白背景または透過背景・3×2（上段=あ・い・う、下段=え・お・閉じ）→ `assets/mouth_sheet.png`
 
 置き換えたら `python prepare_character.py` を実行してください。
 口パクは「閉じ」の顔をベースに、各母音の絵から口元だけを切り取って重ねるので、髪や目は動きません。
