@@ -38,6 +38,44 @@ def clean_tags(tags: list[str]) -> list[str]:
     return out
 
 
+def upload_video(yt, path: Path, title: str, description: str, tags: list[str]) -> str:
+    """動画を非公開でアップロードして、動画IDを返す（一時的なエラーは再試行）。"""
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaFileUpload
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description.replace("<", "＜").replace(">", "＞")[:5000],
+            "tags": clean_tags(tags),
+            "categoryId": CATEGORY_ID,
+            "defaultLanguage": "ja",
+            "defaultAudioLanguage": "ja",
+        },
+        "status": {
+            "privacyStatus": "private",       # 自分で確認してから YouTube Studio で公開する
+            "selfDeclaredMadeForKids": False,
+            "containsSyntheticMedia": SYNTHETIC,  # AI 生成コンテンツの開示
+        },
+    }
+    media = MediaFileUpload(str(path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
+    request = yt.videos().insert(part="snippet,status", body=body, media_body=media)
+    response, retries = None, 0
+    while response is None:
+        try:
+            status, response = request.next_chunk()
+            if status:
+                log.info(f"アップロード中（{path.name}）… {int(status.progress() * 100)}%")
+        except HttpError as e:
+            if e.resp.status in (500, 502, 503, 504) and retries < 8:
+                retries += 1
+                wait = min(60, 2 ** retries) + random.random()
+                log.warning(f"一時的なエラー {e.resp.status}。{wait:.0f}秒後に再試行します。")
+                time.sleep(wait)
+                continue
+            raise
+    return response["id"]
+
+
 def main():
     cid, secret, refresh = (os.getenv("YT_CLIENT_ID"), os.getenv("YT_CLIENT_SECRET"),
                             os.getenv("YT_REFRESH_TOKEN"))
@@ -59,43 +97,12 @@ def main():
     yt = build("youtube", "v3", credentials=creds, cache_discovery=False)
 
     title = meta["title"].replace("<", "＜").replace(">", "＞")[:100]
-    body = {
-        "snippet": {
-            "title": title,
-            "description": meta["description"].replace("<", "＜").replace(">", "＞")[:5000],
-            "tags": clean_tags(meta.get("tags", [])),
-            "categoryId": CATEGORY_ID,
-            "defaultLanguage": "ja",
-            "defaultAudioLanguage": "ja",
-        },
-        "status": {
-            "privacyStatus": "private",       # 自分で確認してから YouTube Studio で公開する
-            "selfDeclaredMadeForKids": False,
-            "containsSyntheticMedia": SYNTHETIC,  # AI 生成コンテンツの開示
-        },
-    }
-
-    media = MediaFileUpload(str(video), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
-    request = yt.videos().insert(part="snippet,status", body=body, media_body=media)
-
-    response, retries = None, 0
-    while response is None:
-        try:
-            status, response = request.next_chunk()
-            if status:
-                log.info(f"アップロード中… {int(status.progress() * 100)}%")
-        except HttpError as e:
-            if e.resp.status in (500, 502, 503, 504) and retries < 8:
-                retries += 1
-                wait = min(60, 2 ** retries) + random.random()
-                log.warning(f"一時的なエラー {e.resp.status}。{wait:.0f}秒後に再試行します。")
-                time.sleep(wait)
-                continue
-            log.error(f"アップロード失敗: {e}")
-            notify(f"⚠️ YouTube へのアップロードに失敗しました: {str(e)[:300]}")
-            sys.exit(1)
-
-    video_id = response["id"]
+    try:
+        video_id = upload_video(yt, video, title, meta["description"], meta.get("tags", []))
+    except Exception as e:
+        log.error(f"アップロード失敗: {e}")
+        notify(f"⚠️ YouTube へのアップロードに失敗しました: {str(e)[:300]}")
+        sys.exit(1)
     log.info(f"アップロード完了: https://youtu.be/{video_id}")
 
     thumb = WORK / "thumbnail.jpg"
@@ -108,10 +115,30 @@ def main():
             log.warning(f"サムネイル設定に失敗（チャンネルの電話番号認証が必要な場合があります）: {e}")
             thumb_note = "\n※ サムネイルは設定できませんでした（Artifacts の thumbnail.jpg を手動で設定してください）。"
 
+    # ショート（本編へのリンクを説明欄に入れる）
+    short_lines = []
+    shorts_path = WORK / "shorts.json"
+    shorts = json.loads(shorts_path.read_text(encoding="utf-8")) if shorts_path.exists() else []
+    for i, sh in enumerate(shorts, 1):
+        path = WORK / sh["file"]
+        if not path.exists():
+            continue
+        try:
+            desc = sh["description"].replace("{MAIN_URL}", f"https://youtu.be/{video_id}")
+            sid = upload_video(yt, path, sh["title"].replace("<", "＜").replace(">", "＞")[:100], desc,
+                               meta.get("tags", []))
+            log.info(f"ショート{i} アップロード完了: https://youtu.be/{sid}")
+            short_lines.append(f"📱 ショート{i}「{sh['title']}」\nhttps://studio.youtube.com/video/{sid}/edit")
+        except Exception as e:
+            log.warning(f"ショート{i}のアップロードに失敗: {e}")
+            short_lines.append(f"⚠️ ショート{i}のアップロードに失敗しました（Artifacts の {sh['file']} を手動で投稿できます）")
+
     minutes = meta.get("duration_sec", 0) / 60
     notify(f"✅ **非公開でアップロードしました**（{minutes:.1f}分）\n"
-           f"「{title}」\nhttps://studio.youtube.com/video/{video_id}/edit\n"
-           f"内容を確認してから YouTube Studio で公開してください。{thumb_note}")
+           f"「{title}」\nhttps://studio.youtube.com/video/{video_id}/edit{thumb_note}\n"
+           + ("\n".join(short_lines) + "\n" if short_lines else "")
+           + "内容を確認してから YouTube Studio で公開してください。"
+           + ("ショートは本編を公開してから公開すると、説明欄のリンクが有効になります。" if short_lines else ""))
 
 
 if __name__ == "__main__":
