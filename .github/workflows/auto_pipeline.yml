@@ -116,7 +116,7 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}       # 任意（画像生成失敗時の予備）
           POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }} # 任意（画像生成の制限緩和）
           CHANNEL_THEME: ${{ vars.CHANNEL_THEME }}
-          VOICEVOX_SPEAKER: ${{ vars.VOICEVOX_SPEAKER }}        # 任意（話者ID。未設定なら 3=ずんだもん）
+          VOICEVOX_SPEAKER: ${{ vars.VOICEVOX_SPEAKER || '12' }} # 話者ID（未設定なら 12=白上虎太郎）
           INPUT_VIDEO_TITLE: ${{ inputs.video_title }}
           INPUT_PLAN_TEXT: ${{ inputs.plan_text }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}   # 台本完成・失敗の通知用

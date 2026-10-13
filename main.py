@@ -64,7 +64,7 @@ IMAGE_STYLE = os.getenv(
 )
 
 VOICEVOX_URL = os.getenv("VOICEVOX_URL", "http://localhost:50021")
-VOICEVOX_SPEAKER = int(os.getenv("VOICEVOX_SPEAKER") or "3")   # 3 = ずんだもん（ノーマル）
+VOICEVOX_SPEAKER = int(os.getenv("VOICEVOX_SPEAKER") or "12")  # 12 = 白上虎太郎（ふつう）。Variables で変更可
 VOICEVOX_SPEED = float(os.getenv("VOICEVOX_SPEED", "1.12"))
 TTS_ENGINE = os.getenv("TTS_ENGINE", "voicevox")               # voicevox / gtts
 
@@ -82,7 +82,7 @@ EXPRESSIONS = ("normal", "smile", "surprised", "thinking")
 # 解説キャラクター（assets/character/*.png があれば画面右下に表示）
 CHARACTER_DIR = Path(os.getenv("CHARACTER_DIR", "assets/character"))
 CHARACTER_HEIGHT = int(os.getenv("CHARACTER_HEIGHT", "430"))
-TALK_SCALE = float(os.getenv("TALK_SCALE", "1.035"))  # 口パク素材と表情素材の顔の大きさを揃える倍率
+TALK_SCALE = float(os.getenv("TALK_SCALE", "1.12"))  # 口パク素材と表情素材の顔の大きさを揃える倍率
 MOUTHS = ("a", "i", "u", "e", "o", "n")
 
 # 台本の品質チェック（企画との一致度・具体性）の合格ライン（10点満点）
@@ -110,8 +110,11 @@ class Script(BaseModel):
     video_title: str = Field(description="YouTube の動画タイトル（日本語、40文字以内）")
     description: str = Field(description="動画の概要欄の本文（日本語、3〜5行）")
     tags: list[str] = Field(description="YouTube のタグ 8〜15個")
-    thumbnail_text: str = Field(description="サムネイルに大きく載せる短いコピー（8〜14文字）")
-    thumbnail_prompt: str = Field(description="サムネイル用の印象的な挿絵の英語プロンプト。文字は含めない。")
+    thumbnail_text: str = Field(description="サムネイルに大きく載せる2行のコピー。1行目と2行目を改行(\\n)で区切り、各行2〜7文字。"
+                                            "単語の途中で改行しない。思わずクリックしたくなる強い言葉（例: スマホが\\n危ない！）")
+    thumbnail_prompt: str = Field(description="サムネイル用の挿絵の英語プロンプト。動画の主題そのもの（例: スマホの話ならスマートフォン本体、"
+                                              "お金の話なら紙幣や財布）を画面の左〜中央に大きくはっきり描く。明るく高コントラストで、背景はシンプル。"
+                                              "画面の右側3分の1は人物を置くので主題を置かない。人物・文字・ロゴは描かない。")
     chapters: list[Chapter]
 
 
@@ -415,7 +418,7 @@ class TTS:
                     return sp["name"]
         except Exception:
             pass
-        return "ずんだもん"
+        return "白上虎太郎"
 
     def synth(self, text: str) -> tuple[np.ndarray, list | None]:
         """音声と口パク用のタイミング [(開始秒, 終了秒, 口の形), ...] を返す。
@@ -726,16 +729,19 @@ class Character:
         img = img.resize((round(img.width * height / img.height), height), Image.LANCZOS)
         a0 = np.asarray(img.getchannel("A"))
         # 素材の上・左右が画像の端でまっすぐ切れているか（髪の毛が見切れている素材など）
-        cut_top = (a0[0] > 128).mean() > 0.03
-        cut_left = (a0[:, 0] > 128).mean() > 0.03
-        cut_right = (a0[:, -1] > 128).mean() > 0.03
+        # 髪の先が端に少し触れているだけなら「切れている」とはみなさない（不透明な部分が辺の15%以上で判定）
+        cut_top = (a0[0] > 128).mean() > 0.15
+        cut_left = (a0[:, 0] > 128).mean() > 0.15
+        cut_right = (a0[:, -1] > 128).mean() > 0.15
 
         pad = 12
         canvas = Image.new("RGBA", (img.width + pad * 2, img.height + pad), (0, 0, 0, 0))
         canvas.paste(img, (pad, pad), img)
         # 背景から浮かせるための白フチ
         a = canvas.getchannel("A").point(lambda v: 255 if v > 90 else 0)
-        a = a.filter(ImageFilter.MaxFilter(13)).filter(ImageFilter.GaussianBlur(1.2))
+        # 太らせてからぼかし→しきい値で角を丸め、髪の毛先でフチがギザギザになるのを防ぐ
+        a = a.filter(ImageFilter.MaxFilter(15)).filter(ImageFilter.GaussianBlur(8))
+        a = a.point(lambda v: 255 if v > 100 else 0).filter(ImageFilter.GaussianBlur(1.5))
         a = Image.fromarray((np.asarray(a).astype(np.float32) * 0.95).astype(np.uint8))
         out = Image.new("RGBA", canvas.size, (255, 255, 255, 0))
         out.putalpha(a)
@@ -976,50 +982,83 @@ def render_video(timeline: list[dict], narration_path: Path) -> Path:
 
 # ============================== 5. サムネイル・メタデータ ==============================
 
+def split_thumb_text(text: str) -> list[str]:
+    """サムネの文言を2行に分ける。改行があればそれに従い、なければ助詞などの切れ目で中央付近を選ぶ。"""
+    text = text.strip().replace("\\n", "\n")
+    if "\n" in text:
+        return [l.strip() for l in text.split("\n") if l.strip()][:2]
+    if len(text) <= 7:
+        return [text]
+    mid = len(text) / 2
+    cands = [i + 1 for i, ch in enumerate(text[:-1])
+             if ch in "のもはがをにでとへや、！？!?" or (ch in "ーっ" and i + 1 < len(text))]
+    # カタカナ語の途中で切らない
+    kata = lambda c: "゠" <= c <= "ヿ"
+    cands = [i for i in cands if not (kata(text[i - 1]) and kata(text[i]))]
+    cut = min(cands, key=lambda i: abs(i - mid)) if cands else int(mid)
+    if abs(cut - mid) > len(text) * 0.35:
+        cut = int(mid)
+    return [text[:cut], text[cut:]]
+
+
+def _fit_font(line: str, max_w: int, max_size: int, min_size: int = 70):
+    size = max_size
+    font = load_font(size)
+    while font.getlength(line) > max_w and size > min_size:
+        size -= 6
+        font = load_font(size)
+    return font
+
+
 def make_thumbnail(script: Script, timeline: list[dict], seed: int) -> Path:
+    """主題が伝わる絵＋大きな2行の文字＋驚き顔のキャラ、のYouTubeらしいサムネを作る。"""
     TW, TH = 1280, 720
     path = WORK / "thumbnail.jpg"
     src = IMG_DIR / "thumbnail_src.jpg"
     get_scene_image(script.thumbnail_prompt, timeline[0]["search_keyword"], src, seed)
-    img = Image.open(src).convert("RGB").resize((TW, TH), Image.LANCZOS)
-    img = ImageEnhance.Contrast(img).enhance(1.15)
-    img = ImageEnhance.Color(img).enhance(1.2)
+    img = Image.open(src).convert("RGB")
+    # 中央から 16:9 に切り抜いて、明るく・鮮やかに
+    img = img.resize((TW, TH), Image.LANCZOS)
+    img = ImageEnhance.Contrast(img).enhance(1.2)
+    img = ImageEnhance.Color(img).enhance(1.3)
+    img = ImageEnhance.Brightness(img).enhance(1.05)
 
-    # 文字を読みやすくするため下側を暗くする
+    # 文字の後ろ（左下）だけを暗くして、絵の主題は明るいまま残す
     shade = Image.new("L", (TW, TH), 0)
-    ImageDraw.Draw(shade).rectangle((0, 360, TW, TH), fill=160)
-    shade = shade.filter(ImageFilter.GaussianBlur(60))
+    ImageDraw.Draw(shade).rectangle((0, 400, 900, TH), fill=175)
+    shade = shade.filter(ImageFilter.GaussianBlur(70))
     img.paste((0, 0, 0), (0, 0), shade)
+    img = img.convert("RGBA")
 
-    # 驚いた表情のキャラを右下に大きく配置
-    text_right = TW - 50
-    char = Character(560)
+    # 驚き顔のキャラを右下に大きく
+    text_right = TW - 40
+    char = Character(600)
     if char.enabled:
         sprite = char.get("surprised")
-        x = TW - sprite.width + 40
-        img.paste(sprite, (x, TH - sprite.height + 14), sprite)
-        text_right = x + 60
+        x = TW - sprite.width + 70
+        img.alpha_composite(sprite, (x, TH - sprite.height + 14))
+        text_right = max(760, x + 90)
 
-    text = script.thumbnail_text.strip()[:16]
-    max_w = text_right - 50
-    size = 150
-    font = load_font(size)
-    lines = [text]
-    while size > 70:
-        lines = wrap_text(text, font, max_w)
-        if len(lines) <= 2:
-            break
-        size -= 8
-        font = load_font(size)
-    lines = lines[:2]
-    d = ImageDraw.Draw(img)
-    line_h = int(size * 1.15)
-    y = TH - 40 - len(lines) * line_h
-    for line in lines:
-        x = 50 if char.enabled else (TW - font.getlength(line)) / 2
-        d.text((x, y), line, font=font, fill=(255, 225, 40), stroke_width=12, stroke_fill=(10, 10, 10))
-        y += line_h
-    img.save(path, "JPEG", quality=90)
+    # 2行の大きな文字（1行目=白、2行目=黄色）。行ごとに入る最大サイズにする
+    lines = split_thumb_text(script.thumbnail_text)
+    max_w = text_right - 45
+    styles = [((255, 255, 255), (0, 0, 0)), ((255, 221, 0), (0, 0, 0))]
+    fonts = [_fit_font(l, max_w, 175 if len(lines) > 1 else 190) for l in lines]
+    if len(fonts) == 2:  # 2行の大きさが極端に違わないようにそろえる
+        small = min(f.size for f in fonts)
+        fonts = [load_font(min(f.size, int(small * 1.25))) for f in fonts]
+    total_h = sum(int(f.size * 1.12) for f in fonts)
+    y = TH - 38 - total_h
+    layer = Image.new("RGBA", (TW, TH), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    for i, (line, font) in enumerate(zip(lines, fonts)):
+        fill, stroke = styles[min(i, 1)] if len(lines) > 1 else styles[1]
+        sw = max(8, font.size // 11)
+        d.text((40 + 7, y + 9), line, font=font, fill=(0, 0, 0, 160), stroke_width=sw, stroke_fill=(0, 0, 0, 160))  # 影
+        d.text((40, y), line, font=font, fill=fill, stroke_width=sw, stroke_fill=stroke)
+        y += int(font.size * 1.12)
+    img.alpha_composite(layer)
+    img.convert("RGB").save(path, "JPEG", quality=92)
     return path
 
 
