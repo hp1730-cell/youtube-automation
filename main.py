@@ -49,7 +49,9 @@ CHARS_PER_MIN = 330        # 日本語ナレーションの目安（文字/分�
 TARGET_CHARS = int(TARGET_MINUTES * CHARS_PER_MIN)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite").split(",") if m.strip()]
+# 使う Gemini モデル（左から順に試す）。使えないモデルは自動で飛ばし、
+# エラーに書かれた後継モデルや、API の一覧から見つけた新しい flash 系モデルに自動で切り替える。
+GEMINI_MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite").split(",") if m.strip()]
 
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN")
@@ -131,23 +133,68 @@ def gemini_client():
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
+_DEAD_MODELS: set[str] = set()      # 404 などで使えなかったモデル
+_DISCOVERED = False                  # API のモデル一覧をもう調べたか
+
+
+def _discover_models(client) -> list[str]:
+    """API のモデル一覧から、文章生成に使える flash 系モデルを新しい順に返す。"""
+    found = []
+    try:
+        for m in client.models.list():
+            name = (m.name or "").removeprefix("models/")
+            actions = getattr(m, "supported_actions", None) or []
+            if "flash" in name and "generateContent" in actions and not any(
+                    k in name for k in ("image", "tts", "audio", "live", "embedding", "preview", "exp")):
+                found.append(name)
+    except Exception as e:
+        log.warning(f"モデル一覧の取得に失敗: {e}")
+
+    def version(n: str):
+        v = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
+        return (float(v.group(1)) if v else 0, "lite" not in n)
+    found.sort(key=version, reverse=True)
+    if found:
+        log.info(f"使える可能性のあるモデル: {', '.join(found[:6])}")
+    return found
+
+
 def call_gemini(prompt: str, config, label: str):
     """モデルを順に試し、混雑時は待って再試行する。"""
+    global _DISCOVERED
     client = gemini_client()
     last_err = None
-    for model in GEMINI_MODELS:
+    queue = [m for m in GEMINI_MODELS if m not in _DEAD_MODELS]
+    while queue:
+        model = queue.pop(0)
+        if model in _DEAD_MODELS:
+            continue
         for attempt in range(3):
             try:
                 log.info(f"Gemini（{model}）: {label}（試行 {attempt + 1}）")
-                return client.models.generate_content(model=model, contents=prompt, config=config)
+                resp = client.models.generate_content(model=model, contents=prompt, config=config)
+                if model in GEMINI_MODELS:  # 次回から最初にこのモデルを使う
+                    GEMINI_MODELS.remove(model)
+                GEMINI_MODELS.insert(0, model)
+                return resp
             except Exception as e:
                 last_err = e
                 msg = str(e)
                 log.warning(f"Gemini エラー: {msg[:300]}")
-                if "404" in msg or "NOT_FOUND" in msg:
-                    break  # このモデルは使えないので次のモデルへ
+                quota_zero = "limit: 0" in msg or "limit:0" in msg
+                if "404" in msg or "NOT_FOUND" in msg or quota_zero:
+                    # このモデルは使えない（終了済み・無料枠なし）。エラー文に後継モデルがあれば候補に足す
+                    _DEAD_MODELS.add(model)
+                    for nxt in re.findall(r"use models/([\w.\-]+)", msg):
+                        if nxt not in _DEAD_MODELS and nxt not in queue:
+                            log.info(f"エラーで案内された後継モデル {nxt} を試します。")
+                            queue.insert(0, nxt)
+                    break
                 busy = any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500"))
                 time.sleep((30 if busy else 5) * (attempt + 1))
+        if not queue and not _DISCOVERED:
+            _DISCOVERED = True  # 候補が尽きたら、API の一覧から探す（1回だけ）
+            queue = [m for m in _discover_models(client) if m not in _DEAD_MODELS]
     raise RuntimeError(f"Gemini の呼び出しに失敗しました（{label}）: {last_err}")
 
 
