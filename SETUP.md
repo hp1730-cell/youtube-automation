@@ -146,6 +146,8 @@ Actions タブ → 「YouTube Auto-Production Pipeline」→ **Run workflow** �
 | 名前 | 既定値 | 内容 |
 |---|---|---|
 | `TARGET_MINUTES` | 8 | 動画の長さの目安（分） |
+| `SHORTS_COUNT` | 2 | 本編と一緒に作るショート動画の本数（0 で作らない） |
+| `SHORT_MAX_SEC` | 58 | ショートの最大の長さ（秒） |
 | `GEMINI_MODELS` | `gemini-2.5-flash,gemini-2.5-flash-lite` | 使うモデル（左から順に試行）。新しいモデルが出たら先頭に追加 |
 | `IMAGE_STYLE` | アニメ調 | 全画像に共通で付ける画風の指定 |
 | `VOICEVOX_SPEED` | 1.12 | 話す速さ |

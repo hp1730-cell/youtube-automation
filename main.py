@@ -1085,23 +1085,20 @@ def read_wav(path: Path) -> np.ndarray:
         return np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def render_video(timeline: list[dict], narration_path: Path) -> Path:
-    log.info("映像のレンダリングを開始します…")
-    r = Renderer(timeline, read_wav(narration_path))
-    out = WORK / "final.mp4"
-    n_frames = r.n_frames
-
+def encode_video(frame_fn, n_frames: int, size: tuple[int, int], total: float,
+                 narration_path: Path, out: Path, label: str = "映像") -> Path:
+    """フレームを ffmpeg に流し込み、ナレーション（＋BGM）と合わせて MP4 にする。"""
+    w, h = size
     cmd = ["ffmpeg", "-y", "-v", "error",
-           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "pipe:0",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(FPS), "-i", "pipe:0",
            "-i", str(narration_path)]
     if BGM_PATH.exists():
-        fade_st = max(r.total - 4, 0)
+        fade_st = max(total - 4, 0)
         cmd += ["-stream_loop", "-1", "-i", str(BGM_PATH),
                 "-filter_complex",
                 f"[2:a]volume={BGM_VOLUME},afade=t=in:d=2,afade=t=out:st={fade_st:.2f}:d=4[bgm];"
                 f"[1:a][bgm]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[a]",
                 "-map", "0:v", "-map", "[a]"]
-        log.info(f"BGM を使用: {BGM_PATH}")
     else:
         cmd += ["-filter_complex", "[1:a]loudnorm=I=-14:TP=-1.5:LRA=11[a]", "-map", "0:v", "-map", "[a]"]
     cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
@@ -1111,17 +1108,25 @@ def render_video(timeline: list[dict], narration_path: Path) -> Path:
     started = time.time()
     try:
         for i in range(n_frames):
-            proc.stdin.write(r.frame(i / FPS, i).tobytes())
+            proc.stdin.write(frame_fn(i / FPS, i).tobytes())
             if i % (FPS * 30) == 0:
                 el = time.time() - started
-                log.info(f"レンダリング {i / FPS / 60:.1f}/{r.total / 60:.1f}分（経過 {el / 60:.1f}分）")
+                log.info(f"{label}のレンダリング {i / FPS / 60:.1f}/{total / 60:.1f}分（経過 {el / 60:.1f}分）")
     finally:
         proc.stdin.close()
         proc.wait()
     if proc.returncode != 0:
-        raise RuntimeError("ffmpeg のエンコードに失敗しました。")
-    log.info(f"レンダリング完了（{(time.time() - started) / 60:.1f}分）")
+        raise RuntimeError(f"ffmpeg のエンコードに失敗しました（{label}）。")
+    log.info(f"{label}のレンダリング完了（{(time.time() - started) / 60:.1f}分）")
     return out
+
+
+def render_video(timeline: list[dict], narration_path: Path) -> Path:
+    log.info("映像のレンダリングを開始します…")
+    if BGM_PATH.exists():
+        log.info(f"BGM を使用: {BGM_PATH}")
+    r = Renderer(timeline, read_wav(narration_path))
+    return encode_video(r.frame, r.n_frames, (W, H), r.total, narration_path, WORK / "final.mp4", "本編")
 
 
 # ============================== 5. サムネイル・メタデータ ==============================
@@ -1211,6 +1216,16 @@ def fmt_ts(sec: float) -> str:
     return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
 
 
+def make_credits(tts: TTS) -> list[str]:
+    credits = []
+    if tts.credit:
+        credits.append(f"音声: {tts.credit}")
+    credits.append("イラスト: AI生成")
+    if BGM_PATH.exists():
+        credits.append(f"BGM: {os.getenv('BGM_CREDIT', '（BGMのクレジットを BGM_CREDIT に設定してください）')}")
+    return credits
+
+
 def build_metadata(script: Script, timeline: list[dict], tts: TTS) -> dict:
     # 概要欄のタイムスタンプ（0:00 から始まり3つ以上あると YouTube のチャプターになる）
     chapters, seen = [], set()
@@ -1218,12 +1233,7 @@ def build_metadata(script: Script, timeline: list[dict], tts: TTS) -> dict:
         if t["chapter"] not in seen:
             seen.add(t["chapter"])
             chapters.append(f"{fmt_ts(0 if not chapters else t['start'])} {t['chapter_title']}")
-    credits = []
-    if tts.credit:
-        credits.append(f"音声: {tts.credit}")
-    credits.append("イラスト: AI生成")
-    if BGM_PATH.exists():
-        credits.append(f"BGM: {os.getenv('BGM_CREDIT', '（BGMのクレジットを BGM_CREDIT に設定してください）')}")
+    credits = make_credits(tts)
     description = (f"{script.description.strip()}\n\n▼目次\n" + "\n".join(chapters)
                    + "\n\n" + "\n".join(credits))
     return {
@@ -1232,6 +1242,255 @@ def build_metadata(script: Script, timeline: list[dict], tts: TTS) -> dict:
         "tags": script.tags,
         "duration_sec": round(timeline[-1]["start"] + timeline[-1]["duration"], 1),
     }
+
+
+# ============================== 6. ショート動画 ==============================
+# 本編の台本から一番「へえ」となる話題を選び、縦長・1分以内のショートを作る。
+# 画像は本編のものを使い回すので、画像生成の追加はない。
+
+SHORTS_COUNT = int(os.getenv("SHORTS_COUNT", "2"))       # 0 にするとショートを作らない
+SHORT_MAX_SEC = float(os.getenv("SHORT_MAX_SEC", "58"))  # ショートの最大の長さ（秒）
+SW, SH = 1080, 1920                                       # 縦長
+SHORT_GAP = 0.15                                          # ショートは間を詰めてテンポよく
+PANEL_Y, PANEL_W, PANEL_H = 300, 1080, 810                # 中央の絵の位置と大きさ（4:3）
+SHORT_SUB_Y = 1130                                        # 字幕の上端
+SHORT_CHAR_H = int(os.getenv("SHORT_CHAR_HEIGHT", "560"))
+
+
+class ShortScene(BaseModel):
+    narration: str = Field(description="日本語のナレーション。話し言葉で1〜2文、20〜60文字。")
+    source_scene: int = Field(description="このシーンの絵として使う本編シーンの番号（台本一覧の [番号]）")
+    expression: str = Field(description="解説キャラの表情。normal, smile, surprised, thinking のいずれか。")
+
+
+class Short(BaseModel):
+    title: str = Field(description="ショートのタイトル（日本語、30文字以内、ハッシュタグは付けない）")
+    hook_text: str = Field(description="画面上部にずっと表示する見出し。2行（改行\\nで区切る）、各行2〜9文字。単語の途中で改行しない")
+    scenes: list[ShortScene]
+
+
+class ShortsPlan(BaseModel):
+    shorts: list[Short]
+
+
+def plan_shorts(script: Script) -> list[Short]:
+    numbered, no = [], 0
+    for ch in script.chapters:
+        numbered.append(f"\n## {ch.title}")
+        for sc in ch.scenes:
+            no += 1
+            numbered.append(f"[{no}] {sc.narration}")
+    chars_min, chars_max = int(SHORT_MAX_SEC * 4.0), int(SHORT_MAX_SEC * 4.8)
+    prompt = f"""あなたは YouTube ショート動画の構成作家です。次の本編動画の台本から、ショート動画（縦長・1分以内）を{SHORTS_COUNT}本作ってください。
+
+# 本編のタイトル
+{script.video_title}
+
+# 本編の台本（[番号] はシーン番号）
+{chr(10).join(numbered)}
+
+# ショートの要件
+- 1本のショートは、本編の中で最も意外で「へえ」となる話題1つに絞る。ショート同士で話題を重ねない。
+- 1シーン目は、2秒で指が止まる問いかけか意外な事実から始める（あいさつはしない）。
+- ナレーション合計は{chars_min}〜{chars_max}文字。1シーンは1〜2文、20〜60文字。6〜10シーン。
+- 事実は本編の台本に書かれていることだけを使う。
+- 最後のシーンは「続きは本編で詳しく解説しています」のように、本編へ自然に誘導して終える。
+- 記号・絵文字・括弧書き・読み間違えやすい英字略語は使わない（音声合成で読み上げるため）。
+- source_scene には、そのシーンの内容に最も合う本編シーンの番号を入れる。同じ番号を3回以上続けない。
+- expression は、意外な事実→surprised、問いかけ→thinking、締め→smile、それ以外→normal。半分以上は normal にする。
+- hook_text は、画面上部に大きく出す見出し。タイトルより短く、強い言葉で。"""
+    plan = llm_json(prompt, ShortsPlan, "ショートの構成", temperature=0.7)
+    shorts = []
+    for sh in plan.shorts[:SHORTS_COUNT]:
+        scenes = []
+        for sc in sh.scenes:
+            sc.narration = re.sub(r"[\"“”「」『』（）()【】\[\]*#＊＃~〜]", "", sc.narration).strip()
+            if len(sc.narration) < 2:
+                continue
+            sc.source_scene = min(max(sc.source_scene, 1), no)
+            if sc.expression not in EXPRESSIONS:
+                sc.expression = "normal"
+            scenes.append(sc)
+        if scenes:
+            sh.scenes = scenes
+            shorts.append(sh)
+    return shorts
+
+
+def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) -> tuple[list[dict], Path]:
+    tl, pieces, t = [], [], 0.0
+    gap = np.zeros(int(SR * SHORT_GAP), dtype=np.float32)
+    for k, sc in enumerate(short.scenes):
+        audio, visemes = tts.synth(sc.narration)
+        voice = len(audio) / SR
+        dur = voice + SHORT_GAP
+        if t + dur > SHORT_MAX_SEC and tl:
+            log.warning(f"ショート{idx}: {SHORT_MAX_SEC:.0f}秒を超えるため、残りのシーンを省きます。")
+            break
+        pieces += [audio, gap]
+        tl.append({"index": k, "start": t, "duration": dur, "voice_duration": voice,
+                   "narration": sc.narration, "expression": sc.expression, "visemes": visemes,
+                   "camera": ("zoom_in", "zoom_out")[k % 2],
+                   "image": long_tl[sc.source_scene - 1]["image"]})
+        t += dur
+    path = WORK / f"short_{idx}_narration.wav"
+    write_wav(path, np.concatenate(pieces))
+    return tl, path
+
+
+class ShortRenderer:
+    """縦長ショートの描画：上に見出し、中央に絵、その下に字幕、一番下に解説キャラ。"""
+
+    def __init__(self, timeline: list[dict], narration: np.ndarray, hook_text: str):
+        self.tl = timeline
+        self.total = timeline[-1]["start"] + timeline[-1]["duration"]
+        self.n_frames = int(self.total * FPS) + 1
+        self.sub_font = load_font(66)
+        self.char = Character(SHORT_CHAR_H)
+        self.env = voice_envelope(narration, self.n_frames)
+        self.mouth = mouth_track(timeline, self.env, self.n_frames) if self.char.lipsync else None
+        self.hook = self._render_hook(hook_text)
+        self._src: dict[str, Image.Image] = {}
+        self._bg: dict[str, Image.Image] = {}
+        self.subs = []
+        for sc in timeline:
+            sents = split_sentences(sc["narration"])
+            total_chars = sum(len(x) for x in sents)
+            cur = sc["start"]
+            for k, x in enumerate(sents):
+                d = sc["voice_duration"] * len(x) / total_chars
+                self.subs.append((cur, cur + d + (SHORT_GAP if k == len(sents) - 1 else 0), x))
+                cur += d
+        self._sub_cache: dict[int, Image.Image] = {}
+
+    def _render_hook(self, text: str) -> Image.Image:
+        lines = split_thumb_text(text)
+        layer = Image.new("RGBA", (SW, PANEL_Y), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        max_size = 110
+        while True:  # 見出しが上の帯（PANEL_Y）に収まるまで小さくする
+            fonts = [_fit_font(l, SW - 80, max_size, 50) for l in lines]
+            if len(fonts) == 2:
+                small = min(f.size for f in fonts)
+                fonts = [load_font(min(f.size, int(small * 1.2))) for f in fonts]
+            total_h = sum(int(f.size * 1.15) for f in fonts)
+            if total_h <= PANEL_Y - 50 or max_size <= 50:
+                break
+            max_size -= 6
+        y = (PANEL_Y - total_h) // 2
+        colors = [(255, 255, 255), (255, 221, 0)] if len(lines) > 1 else [(255, 221, 0)]
+        for line, font, color in zip(lines, fonts, colors):
+            sw = max(7, font.size // 11)
+            x = (SW - font.getlength(line)) / 2
+            d.text((x + 5, y + 7), line, font=font, fill=(0, 0, 0, 150), stroke_width=sw, stroke_fill=(0, 0, 0, 150))
+            d.text((x, y), line, font=font, fill=color, stroke_width=sw, stroke_fill=(0, 0, 0))
+            y += int(font.size * 1.15)
+        return layer
+
+    def _source(self, path: str) -> Image.Image:
+        if path not in self._src:
+            if len(self._src) > 4:
+                self._src.pop(next(iter(self._src)))
+                self._bg.pop(next(iter(self._bg)), None)
+            img = Image.open(path).convert("RGB")
+            self._src[path] = img
+            # 背景：同じ絵を縦長に切り抜いて、ぼかして暗くしたもの
+            w, h = img.size
+            cw = int(h * SW / SH)
+            bg = img.crop(((w - cw) // 2, 0, (w - cw) // 2 + cw, h)).resize((SW, SH), Image.BILINEAR)
+            bg = bg.filter(ImageFilter.GaussianBlur(28))
+            self._bg[path] = ImageEnhance.Brightness(bg).enhance(0.45)
+        return self._src[path]
+
+    def _scene_frame(self, idx: int, local_t: float) -> Image.Image:
+        sc = self.tl[idx]
+        img = self._source(sc["image"])
+        frame = self._bg[sc["image"]].copy()
+        sw, sh = img.size
+        p = smoothstep(local_t / (sc["duration"] + FADE))
+        f = 0.96 - 0.12 * p if sc["camera"] == "zoom_in" else 0.84 + 0.12 * p
+        ch = sh * f
+        cw = ch * PANEL_W / PANEL_H
+        cx, cy = sw / 2, sh / 2
+        panel = img.resize((PANEL_W, PANEL_H), Image.BILINEAR, box=(cx - cw / 2, cy - ch / 2, cx + cw / 2, cy + ch / 2))
+        frame.paste(panel, (0, PANEL_Y))
+        return frame
+
+    def _scene_at(self, t: float) -> int:
+        idx = 0
+        for i, sc in enumerate(self.tl):
+            if sc["start"] <= t:
+                idx = i
+        return idx
+
+    def _subtitle_at(self, t: float):
+        for i, (s, e, text) in enumerate(self.subs):
+            if s <= t < e:
+                if i not in self._sub_cache:
+                    lines = wrap_text(text, self.sub_font, SW - 90)[:3]
+                    line_h = int(self.sub_font.size * 1.32)
+                    img = Image.new("RGBA", (SW, line_h * len(lines) + 30), (0, 0, 0, 0))
+                    d = ImageDraw.Draw(img)
+                    for k, line in enumerate(lines):
+                        x = (SW - self.sub_font.getlength(line)) / 2
+                        d.text((x, 10 + k * line_h), line, font=self.sub_font, fill=(255, 255, 255),
+                               stroke_width=7, stroke_fill=(20, 20, 20))
+                    self._sub_cache = {i: img}
+                return self._sub_cache[i]
+        return None
+
+    def frame(self, t: float, fi: int = 0) -> Image.Image:
+        idx = self._scene_at(t)
+        sc = self.tl[idx]
+        frame = self._scene_frame(idx, t - sc["start"])
+        end = sc["start"] + sc["duration"]
+        if idx + 1 < len(self.tl) and t > end - FADE:
+            frame = Image.blend(frame, self._scene_frame(idx + 1, 0.0), smoothstep((t - (end - FADE)) / FADE))
+        frame.paste(self.hook, (0, 0), self.hook)
+
+        if self.char.enabled:
+            fi = min(fi, self.n_frames - 1)
+            sprite = self.char.get(sc.get("expression", "normal"), self.mouth[fi] if self.mouth else "n")
+            y_off = -4 * float(self.env[fi]) + 3 * np.sin(2 * np.pi * t / 3.2)
+            local = t - sc["start"]
+            prev = self.tl[idx - 1].get("expression") if idx > 0 else None
+            if prev != sc.get("expression") and local < 0.3:
+                y_off -= 16 * np.sin(np.pi * local / 0.3)
+            x = int(SW / 2 - sprite.width / 2)
+            frame.paste(sprite, (x, SH - sprite.height + 14 + int(round(y_off))), sprite)
+
+        sub = self._subtitle_at(t)
+        if sub is not None:
+            frame.paste(sub, (0, SHORT_SUB_Y), sub)
+        return frame
+
+
+def make_shorts(script: Script, long_tl: list[dict], tts: TTS, credits: list[str]) -> list[dict]:
+    """ショートを作って work/short_N.mp4 と work/shorts.json に保存する。失敗しても本編には影響させない。"""
+    if SHORTS_COUNT <= 0:
+        return []
+    try:
+        shorts = plan_shorts(script)
+    except Exception as e:
+        log.warning(f"ショートの構成を作れなかったため、ショートは作りません: {str(e)[:200]}")
+        return []
+    results = []
+    for i, sh in enumerate(shorts, 1):
+        try:
+            log.info(f"ショート{i}: {sh.title}（{len(sh.scenes)}シーン）")
+            tl, wav = build_short_timeline(sh, tts, long_tl, i)
+            r = ShortRenderer(tl, read_wav(wav), sh.hook_text)
+            out = encode_video(r.frame, r.n_frames, (SW, SH), r.total, wav, WORK / f"short_{i}.mp4", f"ショート{i}")
+            title = sh.title.strip()[:90] + " #Shorts"
+            description = (f"{sh.title.strip()}\n\n▼本編はこちら\n{{MAIN_URL}}\n\n" + "\n".join(credits)
+                           + "\n\n#Shorts")
+            results.append({"file": out.name, "title": title, "description": description,
+                            "duration_sec": round(r.total, 1)})
+        except Exception as e:
+            log.warning(f"ショート{i}の作成に失敗しました（本編はそのまま続行）: {str(e)[:200]}")
+            log.warning(traceback.format_exc())
+    (WORK / "shorts.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    return results
 
 
 # ============================== メイン ==============================
@@ -1268,7 +1527,10 @@ def main():
 
         meta = build_metadata(script, timeline, tts)
         (WORK / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        log.info(f"🎉 完了: {WORK / 'final.mp4'}（{meta['duration_sec'] / 60:.1f}分）")
+        log.info(f"🎉 本編完成: {WORK / 'final.mp4'}（{meta['duration_sec'] / 60:.1f}分）")
+
+        shorts = make_shorts(script, timeline, tts, make_credits(tts))
+        log.info(f"ショート: {len(shorts)}本作成")
     except Exception as e:
         log.error(f"致命的なエラー: {e}")
         log.error(traceback.format_exc())

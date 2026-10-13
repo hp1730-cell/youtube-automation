@@ -138,6 +138,8 @@ jobs:
             work/script.json
             work/research.md
             work/review.json
+            work/short_*.mp4
+            work/shorts.json
           if-no-files-found: warn
           retention-days: 7
 
