@@ -52,6 +52,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # 使う Gemini モデル（左から順に試す）。使えないモデルは自動で飛ばし、
 # エラーに書かれた後継モデルや、API の一覧から見つけた新しい flash 系モデルに自動で切り替える。
 GEMINI_MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite").split(",") if m.strip()]
+GEMINI_BUDGET_SEC = float(os.getenv("GEMINI_BUDGET_SEC", "300"))  # 1回の呼び出しで Gemini を待つ時間の上限（秒）
+
+# Gemini が使えないとき（混雑・上限超過）の予備。企画案と同じ Groq の無料枠を使う
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODELS = [m.strip() for m in os.getenv("GROQ_MODELS", "openai/gpt-oss-120b,llama-3.3-70b-versatile").split(",") if m.strip()]
 
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN")
@@ -137,18 +142,19 @@ def gemini_client():
 
 
 _DEAD_MODELS: set[str] = set()      # 404 などで使えなかったモデル
+_GEMINI_SKIP_UNTIL = 0.0             # Gemini が混雑・上限超過で全滅したら、しばらく Groq を直接使う
 _DISCOVERED = False                  # API のモデル一覧をもう調べたか
 
 
 def _discover_models(client) -> list[str]:
-    """API のモデル一覧から、文章生成に使える flash 系モデルを新しい順に返す。"""
+    """API のモデル一覧から、文章生成に使える flash 系モデルを新しい順に返す（上位4つまで）。"""
     found = []
     try:
         for m in client.models.list():
             name = (m.name or "").removeprefix("models/")
             actions = getattr(m, "supported_actions", None) or []
-            if "flash" in name and "generateContent" in actions and not any(
-                    k in name for k in ("image", "tts", "audio", "live", "embedding", "preview", "exp")):
+            if name.startswith("gemini-") and "flash" in name and "generateContent" in actions and not any(
+                    k in name for k in ("image", "tts", "audio", "live", "embedding", "preview", "exp", "omni")):
                 found.append(name)
     except Exception as e:
         log.warning(f"モデル一覧の取得に失敗: {e}")
@@ -158,34 +164,38 @@ def _discover_models(client) -> list[str]:
         return (float(v.group(1)) if v else 0, "lite" not in n)
     found.sort(key=version, reverse=True)
     if found:
-        log.info(f"使える可能性のあるモデル: {', '.join(found[:6])}")
-    return found
+        log.info(f"使える可能性のあるモデル: {', '.join(found[:4])}")
+    return found[:4]
 
 
-def call_gemini(prompt: str, config, label: str):
-    """モデルを順に試し、混雑時は待って再試行する。"""
+def call_gemini(prompt: str, config, label: str, budget_sec: float = GEMINI_BUDGET_SEC, models: list | None = None):
+    """モデルを順に試す。混雑（503）は間隔をあけて再試行、上限超過（429）は早めに次のモデルへ。
+    1回の呼び出しで待つ時間の合計は budget_sec まで（GitHub Actions の無料枠を無駄にしないため）。"""
     global _DISCOVERED
     client = gemini_client()
+    deadline = time.time() + budget_sec
     last_err = None
-    queue = [m for m in GEMINI_MODELS if m not in _DEAD_MODELS]
-    while queue:
+    queue = [m for m in (models or GEMINI_MODELS) if m not in _DEAD_MODELS]
+    while queue and time.time() < deadline:
         model = queue.pop(0)
         if model in _DEAD_MODELS:
             continue
         for attempt in range(3):
+            if time.time() >= deadline:
+                break
             try:
                 log.info(f"Gemini（{model}）: {label}（試行 {attempt + 1}）")
                 resp = client.models.generate_content(model=model, contents=prompt, config=config)
-                if model in GEMINI_MODELS:  # 次回から最初にこのモデルを使う
-                    GEMINI_MODELS.remove(model)
-                GEMINI_MODELS.insert(0, model)
+                if models is None:  # 次回から最初にこのモデルを使う
+                    if model in GEMINI_MODELS:
+                        GEMINI_MODELS.remove(model)
+                    GEMINI_MODELS.insert(0, model)
                 return resp
             except Exception as e:
                 last_err = e
                 msg = str(e)
-                log.warning(f"Gemini エラー: {msg[:300]}")
-                quota_zero = "limit: 0" in msg or "limit:0" in msg
-                if "404" in msg or "NOT_FOUND" in msg or quota_zero:
+                log.warning(f"Gemini エラー: {msg[:200]}")
+                if "404" in msg or "NOT_FOUND" in msg or "limit: 0" in msg or "limit:0" in msg:
                     # このモデルは使えない（終了済み・無料枠なし）。エラー文に後継モデルがあれば候補に足す
                     _DEAD_MODELS.add(model)
                     for nxt in re.findall(r"use models/([\w.\-]+)", msg):
@@ -193,56 +203,178 @@ def call_gemini(prompt: str, config, label: str):
                             log.info(f"エラーで案内された後継モデル {nxt} を試します。")
                             queue.insert(0, nxt)
                     break
-                busy = any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500"))
-                time.sleep((30 if busy else 5) * (attempt + 1))
-        if not queue and not _DISCOVERED:
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                    if attempt >= 1:
+                        break          # 上限超過は1回だけ待って再試行し、だめなら次のモデルへ
+                    time.sleep(min(20, max(0, deadline - time.time())))
+                    continue
+                # 混雑（503）などは、少しずつ間隔をあけて再試行
+                time.sleep(min(30 * (2 ** attempt), max(0, deadline - time.time())))
+        if not queue and not _DISCOVERED and models is None and time.time() < deadline:
             _DISCOVERED = True  # 候補が尽きたら、API の一覧から探す（1回だけ）
             queue = [m for m in _discover_models(client) if m not in _DEAD_MODELS]
     raise RuntimeError(f"Gemini の呼び出しに失敗しました（{label}）: {last_err}")
 
 
-def call_gemini_structured(prompt: str, schema: type[BaseModel], label: str, temperature: float = 0.7):
-    from google.genai import types
-    config = types.GenerateContentConfig(response_mime_type="application/json",
-                                         response_schema=schema, temperature=temperature)
-    resp = call_gemini(prompt, config, label)
-    return resp.parsed if resp.parsed is not None else schema.model_validate_json(resp.text)
+# ---------- Groq（Gemini が使えないときの予備。無料枠あり） ----------
+
+def call_groq(prompt: str, label: str, temperature: float, json_mode: bool) -> str:
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY が設定されていません。")
+    from groq import Groq
+    client = Groq(api_key=GROQ_API_KEY)
+    last_err = None
+    for model in GROQ_MODELS:
+        for attempt in range(2):
+            try:
+                log.info(f"Groq（{model}）: {label}（試行 {attempt + 1}）")
+                kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+                r = client.chat.completions.create(
+                    model=model, messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature, max_completion_tokens=16000, **kwargs)
+                text = (r.choices[0].message.content or "").strip()
+                if text:
+                    return text
+            except Exception as e:
+                last_err = e
+                log.warning(f"Groq エラー: {str(e)[:200]}")
+                time.sleep(20)
+    raise RuntimeError(f"Groq の呼び出しに失敗しました（{label}）: {last_err}")
+
+
+# ---------- 共通の呼び出し口：Gemini → だめなら Groq ----------
+
+def _gemini_available() -> bool:
+    if time.time() < _GEMINI_SKIP_UNTIL:
+        log.info("Gemini は直前に使えなかったため、Groq を使います。")
+        return False
+    return bool(GEMINI_API_KEY)
+
+
+def _gemini_failed(e: Exception) -> None:
+    """Gemini が全モデルで失敗したら、10分間は試さずに Groq を使う（待ち時間の無駄を防ぐ）。"""
+    global _GEMINI_SKIP_UNTIL
+    _GEMINI_SKIP_UNTIL = time.time() + 600
+    log.warning(f"Gemini が使えないため Groq に切り替えます: {str(e)[:150]}")
+
+
+def _strip_code_fence(text: str) -> str:
+    text = text.strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    return m.group(1).strip() if m else text
+
+
+def llm_text(prompt: str, label: str, temperature: float = 0.3) -> str:
+    if _gemini_available():
+        from google.genai import types
+        try:
+            resp = call_gemini(prompt, types.GenerateContentConfig(temperature=temperature), label)
+            if (resp.text or "").strip():
+                return resp.text.strip()
+        except Exception as e:
+            _gemini_failed(e)
+    return call_groq(prompt, label, temperature, json_mode=False)
+
+
+def llm_json(prompt: str, schema: type[BaseModel], label: str, temperature: float = 0.7):
+    if _gemini_available():
+        from google.genai import types
+        try:
+            config = types.GenerateContentConfig(response_mime_type="application/json",
+                                                 response_schema=schema, temperature=temperature)
+            resp = call_gemini(prompt, config, label)
+            return resp.parsed if resp.parsed is not None else schema.model_validate_json(resp.text)
+        except Exception as e:
+            _gemini_failed(e)
+    from json_repair import repair_json
+    schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+    full = (f"{prompt}\n\n# 出力形式\n次の JSON スキーマに従う JSON オブジェクトだけを出力してください。"
+            f"説明文やコードブロックは付けないこと。\n{schema_text}")
+    last_err = None
+    for _ in range(2):
+        raw = call_groq(full, label, temperature, json_mode=True)
+        try:
+            return schema.model_validate_json(repair_json(_strip_code_fence(raw)))
+        except Exception as e:
+            last_err = e
+            log.warning(f"Groq の出力を読み取れませんでした: {str(e)[:150]}")
+    raise RuntimeError(f"{label} に失敗しました: {last_err}")
 
 
 # ---------- 1-1. リサーチ：台本の「中身」になる事実を先に集める ----------
 
+def web_search_snippets(max_chars: int = 6000) -> str:
+    """無料の検索（DuckDuckGo）で、企画に関する検索結果の要約文を集める。APIキー不要。"""
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+    except ImportError:
+        log.warning("検索ライブラリ（ddgs）がないため、Web 検索をスキップします。")
+        return ""
+    title = INPUT_TITLE or re.sub(r"[*【】企画\d]", "", plan_text().splitlines()[0]).strip()
+    outline = [re.sub(r"^[\s　\d.、．]+", "", l).strip() for l in plan_text().splitlines()
+               if re.match(r"^[\s　]*\d+[.．、]", l)]
+    queries = [title] + [f"{title} {o}" for o in outline[:4]]
+    seen, lines = set(), []
+    try:
+        with DDGS() as ddgs:
+            for q in queries:
+                try:
+                    for r in ddgs.text(q, region="jp-jp", max_results=6) or []:
+                        url = r.get("href") or r.get("url") or ""
+                        if url in seen:
+                            continue
+                        seen.add(url)
+                        lines.append(f"- {r.get('title', '')}：{r.get('body', '')}（{url}）")
+                except Exception as e:
+                    log.warning(f"検索に失敗（{q}）: {str(e)[:120]}")
+                time.sleep(2)
+    except Exception as e:
+        log.warning(f"Web 検索に失敗しました: {str(e)[:150]}")
+    text = "\n".join(lines)[:max_chars]
+    log.info(f"Web 検索結果: {len(lines)}件")
+    return text
+
+
 def research_topic() -> str:
-    """Google 検索グラウンディングで、企画に関する具体的な事実を集めたメモを作る。
-    台本を書く前に材料を揃えることで、抽象的で中身のない台本になるのを防ぐ。"""
+    """企画に関する具体的な事実を集めた「取材メモ」を作る。
+    台本を書く前に材料を揃えることで、抽象的で中身のない台本になるのを防ぐ。
+    ① Gemini の Google 検索（無料枠で使えれば）→ ② 無料の Web 検索結果＋AI のまとめ、の順に試す。"""
     from google.genai import types
-    prompt = f"""次の YouTube 動画企画の台本を書くための「取材メモ」を作ってください。
-Google 検索で調べ、企画の各章で使える具体的な材料を集めてください。
-
-# 企画
-{plan_text()}
-
-# 取材メモの要件
+    rules = """# 取材メモの要件
 - 企画の構成（章）ごとに見出しを立てる。
 - 各見出しの下に、具体的な事実を箇条書きで4〜8個。数字・年・人物・場所・具体的な事例・意外なエピソードを優先する。
 - 視聴者が「へえ」と思う意外な事実を、全体で5つ以上含める。
 - 諸説ある内容は「諸説あり」と明記する。確認できなかったことは書かない。
 - 各事実の末尾に、情報源のサイト名を（）で付ける。
 - 日本語で書く。"""
+    base = f"次の YouTube 動画企画の台本を書くための「取材メモ」を作ってください。\n\n# 企画\n{plan_text()}\n\n"
+
+    # ① Google 検索付き：無料枠では使えないことが多いので、1モデル・短時間だけ試す
     try:
         config = types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())],
                                              temperature=0.3)
-        resp = call_gemini(prompt, config, "企画のリサーチ（Google 検索）")
+        resp = call_gemini(base + "Google 検索で調べ、企画の各章で使える具体的な材料を集めてください。\n\n" + rules,
+                           config, "企画のリサーチ（Google 検索）", budget_sec=60, models=GEMINI_MODELS[:1])
         notes = (resp.text or "").strip()
         if len(notes) > 300:
-            log.info(f"取材メモ: {len(notes)}文字")
+            log.info(f"取材メモ（Google 検索）: {len(notes)}文字")
             return notes
-        log.warning("検索付きのリサーチ結果が短いため、検索なしで再試行します。")
     except Exception as e:
-        log.warning(f"検索付きのリサーチに失敗しました（検索なしで続行）: {e}")
+        log.warning(f"Google 検索付きのリサーチは使えませんでした（別の方法で続行）: {str(e)[:120]}")
 
-    config = types.GenerateContentConfig(temperature=0.3)
-    resp = call_gemini(prompt.replace("Google 検索で調べ、", "あなたの知識をもとに、"), config, "企画のリサーチ")
-    return (resp.text or "").strip()
+    # ② 無料の Web 検索結果をもとに、AI にまとめさせる
+    snippets = web_search_snippets()
+    if snippets:
+        prompt = (base + "以下の Web 検索結果を主な材料にし、足りない部分はあなたの確かな知識で補ってください。"
+                  "検索結果と矛盾することは書かないでください。\n\n# Web 検索結果\n" + snippets + "\n\n" + rules)
+    else:
+        prompt = base + "あなたの確かな知識をもとに、企画の各章で使える具体的な材料を集めてください。\n\n" + rules
+    notes = llm_text(prompt, "企画のリサーチ")
+    log.info(f"取材メモ: {len(notes)}文字")
+    return notes
 
 
 # ---------- 1-2. 台本の執筆 ----------
@@ -307,7 +439,7 @@ def review_script(script: Script, research: str) -> Review:
 
 # 台本（動画タイトル: {script.video_title}）
 {chr(10).join(numbered)}"""
-    return call_gemini_structured(prompt, Review, "台本の品質チェック", temperature=0.2)
+    return llm_json(prompt, Review, "台本の品質チェック", temperature=0.2)
 
 
 def count_chars(script: Script) -> int:
@@ -321,10 +453,22 @@ def generate_script() -> tuple[Script, Review, str]:
 
     best, best_review, best_score, feedback = None, None, -999, ""
     for rnd in range(1, SCRIPT_ROUNDS + 1):
-        script = clean_script(call_gemini_structured(build_script_prompt(research, feedback), Script,
-                                                     f"台本の執筆（{rnd}回目）"))
+        try:
+            script = clean_script(llm_json(build_script_prompt(research, feedback), Script, f"台本の執筆（{rnd}回目）"))
+        except Exception as e:
+            if best is not None:  # 書き直しに失敗しても、それまでの最良の台本で進める
+                log.warning(f"台本の書き直しに失敗したため、前回までの台本を使います: {str(e)[:150]}")
+                break
+            raise
         n = count_chars(script)
-        review = review_script(script, research)
+        try:
+            review = review_script(script, research)
+        except Exception as e:  # 採点だけ失敗した場合は、台本はそのまま使う
+            log.warning(f"品質チェックに失敗したため、採点なしで進めます: {str(e)[:150]}")
+            review = Review(relevance=0, specificity=0, issues=["品質チェックを実行できませんでした"], off_topic_scenes=[])
+            if best is None:
+                best, best_review = script, review
+            break
         length_ok = n >= TARGET_CHARS * 0.8
         score = review.relevance + review.specificity - (0 if length_ok else 3)
         log.info(f"台本 {rnd}回目: {len(script.chapters)}章 / {sum(len(c.scenes) for c in script.chapters)}シーン / "
