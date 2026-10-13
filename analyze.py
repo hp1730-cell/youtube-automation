@@ -97,6 +97,18 @@ def build_prompt(trends: list[str], popular: list[str]) -> str:
 ]}}"""
 
 
+def extract_plans(data) -> list[dict]:
+    """AI の出力がどんな入れ子の形でも、title を持つ企画を取り出す。
+    例: {"plans":[...]} / [{"plans":[...]}] / [{...}, {...}] / {"title":...}"""
+    if isinstance(data, list):
+        return [p for item in data for p in extract_plans(item)]
+    if isinstance(data, dict):
+        if data.get("title"):
+            return [data]
+        return [p for v in data.values() if isinstance(v, (list, dict)) for p in extract_plans(v)]
+    return []
+
+
 def generate_plans(prompt: str) -> list[dict]:
     from groq import Groq
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
@@ -107,9 +119,7 @@ def generate_plans(prompt: str) -> list[dict]:
         response_format={"type": "json_object"},
     )
     raw = completion.choices[0].message.content or ""
-    data = json.loads(repair_json(raw))
-    plans = data.get("plans", []) if isinstance(data, dict) else data
-    plans = [p for p in plans if isinstance(p, dict) and p.get("title")]
+    plans = extract_plans(json.loads(repair_json(raw)))
     if not plans:
         raise RuntimeError(f"企画案を解析できませんでした: {raw[:300]}")
     return plans[:3]
