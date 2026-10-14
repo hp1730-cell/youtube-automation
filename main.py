@@ -45,7 +45,7 @@ FADE = 0.6                 # クロスフェード（秒）
 SRC_SCALE = 1.18           # ズーム・パン用に元画像を少し大きめに用意する倍率
 
 TARGET_MINUTES = float(os.getenv("TARGET_MINUTES", "8"))
-CHARS_PER_MIN = 330        # 日本語ナレーションの目安（文字/分）
+CHARS_PER_MIN = int(os.getenv("CHARS_PER_MIN", "400"))  # 1分あたりのナレーション文字数の目安（VOICEVOX 1.12倍速）
 TARGET_CHARS = int(TARGET_MINUTES * CHARS_PER_MIN)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -488,7 +488,79 @@ def generate_script() -> tuple[Script, Review, str]:
         if not length_ok:
             lines.append(f"- ナレーション合計が{n}文字で短すぎます。取材メモの事実を使って約{TARGET_CHARS}文字にしてください。")
         feedback = "\n".join(lines)
+    best = expand_script(best, research)
     return best, best_review, research
+
+
+def expand_script(script: Script, research: str) -> Script:
+    """台本が目標の文字数に届かないとき、短い章から順に1章ずつ書き足す。
+    AI は長い文章を一度に書くと短くまとめがちなので、章単位に分けて確実に長さを出す。"""
+    for rnd in range(2):
+        total = count_chars(script)
+        if total >= TARGET_CHARS * 0.9:
+            break
+        per_ch = TARGET_CHARS / max(1, len(script.chapters))
+        log.info(f"台本が短いため章ごとに書き足します（{total}文字 / 目標 {TARGET_CHARS}文字、{rnd + 1}回目）")
+        titles = "\n".join(f"{i + 1}. {c.title}" for i, c in enumerate(script.chapters))
+        order = sorted(range(len(script.chapters)),
+                       key=lambda i: sum(len(x.narration) for x in script.chapters[i].scenes))
+        for i in order:
+            if count_chars(script) >= TARGET_CHARS * 0.95:
+                break
+            ch = script.chapters[i]
+            cur = sum(len(x.narration) for x in ch.scenes)
+            if cur >= per_ch * 0.9:
+                continue
+            want = int(per_ch)
+            prev_tail = script.chapters[i - 1].scenes[-1].narration if i > 0 else "（動画の冒頭）"
+            next_head = script.chapters[i + 1].scenes[0].narration if i + 1 < len(script.chapters) else "（動画の締め）"
+            current = "\n".join(f"- {x.narration}" for x in ch.scenes)
+            prompt = f"""あなたは日本の人気YouTube解説チャンネルの構成作家です。
+次の動画台本のうち「第{i + 1}章 {ch.title}」だけを、内容を深掘りして書き直してください。
+
+# 企画
+{plan_text()}
+
+# 動画全体の章立て
+{titles}
+
+# 取材メモ（事実はここから使う）
+{research[:8000]}
+
+# 今の第{i + 1}章のナレーション（{cur}文字。短すぎるので書き足す）
+{current}
+
+# 直前の章の最後のセリフ
+{prev_tail}
+
+# 直後の章の最初のセリフ
+{next_head}
+
+# 要件
+- 第{i + 1}章のナレーション合計を約{want}文字にする（{int(want * 0.9)}〜{int(want * 1.15)}文字）。これを必ず守る。
+- 今の内容は残したうえで、取材メモの具体的な事実（数字・事例・エピソード・理由・身近な例え）を足して深掘りする。
+- 他の章の内容と重複させない。前後の章とつながるようにする。
+- 1シーンは1〜3文、40〜90文字。シーン数は{max(6, round(want / 65))}前後。
+- ナレーションは自然な日本語の話し言葉（です・ます調）。記号・絵文字・括弧書きは使わない。
+- expression は normal / smile / surprised / thinking のいずれか（6割以上 normal）。
+- camera は zoom_in / zoom_out / pan_left / pan_right を織り交ぜる。
+- image_prompt は英語で、そのシーンの内容が一目で分かる具体的な場面。文字・ロゴ・実在の有名人は含めない。
+- title は「{ch.title}」のままにする。"""
+            try:
+                new = llm_json(prompt, Chapter, f"第{i + 1}章の書き足し", temperature=0.7)
+                tmp = clean_script(Script(video_title=script.video_title, description="", tags=[],
+                                          thumbnail_text="", thumbnail_prompt="", chapters=[new]))
+                new_ch = tmp.chapters[0]
+                new_len = sum(len(x.narration) for x in new_ch.scenes)
+                if new_len > cur:
+                    new_ch.title = ch.title
+                    script.chapters[i] = new_ch
+                    log.info(f"  第{i + 1}章: {cur} → {new_len}文字")
+            except Exception as e:
+                log.warning(f"  第{i + 1}章の書き足しに失敗（元のまま）: {str(e)[:150]}")
+    log.info(f"台本の最終的な長さ: {count_chars(script)}文字（目標 {TARGET_CHARS}文字、"
+             f"約{count_chars(script) / CHARS_PER_MIN:.1f}分の見込み）")
+    return script
 
 
 def clean_script(script: Script) -> Script:
@@ -665,7 +737,9 @@ def build_timeline(script: Script, tts: TTS) -> tuple[list[dict], Path]:
     narration = np.concatenate(pieces)
     path = WORK / "narration.wav"
     write_wav(path, narration)
-    log.info(f"ナレーション合計: {t / 60:.1f}分")
+    chars = sum(len(x["narration"]) for x in timeline)
+    log.info(f"ナレーション合計: {t / 60:.1f}分（{chars}文字、実測 {chars / max(t / 60, 0.01):.0f}文字/分。"
+             f"長さがずれる場合は CHARS_PER_MIN をこの値にしてください）")
     return timeline, path
 
 
@@ -1512,7 +1586,8 @@ def main():
             (WORK / "review.json").write_text(review.model_dump_json(indent=2), encoding="utf-8")
             chapters = "\n".join(f"　{i + 1}. {c.title}（{len(c.scenes)}シーン）" for i, c in enumerate(script.chapters))
             issues = "\n".join(f"　・{x}" for x in review.issues[:3])
-            notify_discord(f"📝 **台本ができました**「{script.video_title}」\n{chapters}\n"
+            notify_discord(f"📝 **台本ができました**「{script.video_title}」（{count_chars(script)}文字・"
+                           f"約{count_chars(script) / CHARS_PER_MIN:.0f}分の見込み）\n{chapters}\n"
                            f"企画との一致 {review.relevance}/10・具体性 {review.specificity}/10"
                            + (f"\n残った指摘:\n{issues}" if issues else "")
                            + "\nこのまま音声・画像・映像の制作に進みます。")
