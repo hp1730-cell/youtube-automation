@@ -146,6 +146,7 @@ Actions タブ → 「YouTube Auto-Production Pipeline」→ **Run workflow** �
 | 名前 | 既定値 | 内容 |
 |---|---|---|
 | `TARGET_MINUTES` | 8 | 動画の長さの目安（分） |
+| `CHARS_PER_MIN` | 400 | 1分あたりのナレーション文字数の目安。動画が目標より短い・長いときは、ログの「実測 ○文字/分」の値にする |
 | `SHORTS_COUNT` | 2 | 本編と一緒に作るショート動画の本数（0 で作らない） |
 | `SHORT_MAX_SEC` | 58 | ショートの最大の長さ（秒） |
 | `GEMINI_MODELS` | `gemini-2.5-flash,gemini-2.5-flash-lite` | 使うモデル（左から順に試行）。新しいモデルが出たら先頭に追加 |
