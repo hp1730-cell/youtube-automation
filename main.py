@@ -713,15 +713,40 @@ def write_wav(path: Path, audio: np.ndarray) -> None:
         wf.writeframes(pcm.tobytes())
 
 
+def main_subtitle_layout() -> tuple:
+    """本編の字幕のフォント・横幅・行数（キャラがいるときは、キャラと重ならない幅）。"""
+    font = load_font(58)
+    char = Character(CHARACTER_HEIGHT)
+    width = (W - char.width - 30) - 80 if char.enabled else 1640
+    return font, width, 2
+
+
+def synth_with_subtitles(tts: "TTS", text: str, font, width: int, max_lines: int):
+    """字幕1枚ぶんずつ音声を作ってつなげる。字幕の切り替わりと音声の区切りが必ず一致する。
+    戻り値: (音声, 口パクのタイミング, [(開始秒, 終了秒, 字幕), ...])"""
+    parts = subtitle_chunks(text, font, width, max_lines)
+    audios, visemes, subs, t = [], [], [], 0.0
+    for part in parts:
+        audio, vis = tts.synth(part)
+        dur = len(audio) / SR
+        audios.append(audio)
+        subs.append((t, t + dur, part))
+        if visemes is not None:
+            visemes = None if vis is None else visemes + [(a + t, b + t, sh) for a, b, sh in vis]
+        t += dur
+    return np.concatenate(audios), visemes, subs
+
+
 def build_timeline(script: Script, tts: TTS) -> tuple[list[dict], Path]:
     """シーンごとに音声を作り、開始時刻・長さを確定させる（音声と映像が必ず一致する）。"""
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     timeline, pieces, t = [], [], 0.0
     gap = np.zeros(int(SR * SCENE_GAP), dtype=np.float32)
     total = sum(len(c.scenes) for c in script.chapters)
+    font, width, lines = main_subtitle_layout()
     for ci, ch in enumerate(script.chapters):
         for si, sc in enumerate(ch.scenes):
-            audio, visemes = tts.synth(sc.narration)
+            audio, visemes, sub_parts = synth_with_subtitles(tts, sc.narration, font, width, lines)
             voice_dur = len(audio) / SR
             pieces += [audio, gap]
             dur = voice_dur + SCENE_GAP
@@ -730,7 +755,7 @@ def build_timeline(script: Script, tts: TTS) -> tuple[list[dict], Path]:
                 "start": t, "duration": dur, "voice_duration": voice_dur,
                 "narration": sc.narration, "image_prompt": sc.image_prompt,
                 "search_keyword": sc.search_keyword, "camera": sc.camera,
-                "expression": sc.expression, "visemes": visemes,
+                "expression": sc.expression, "visemes": visemes, "sub_parts": sub_parts,
             })
             t += dur
             log.info(f"音声 {len(timeline)}/{total}: {voice_dur:.1f}秒")
@@ -901,6 +926,61 @@ def split_sentences(text: str) -> list[str]:
     return merged or [text]
 
 
+def subtitle_chunks(text: str, font, max_width: int, max_lines: int = 2) -> list[str]:
+    """字幕1枚が max_lines 行に収まるよう、文を読点などの切れ目で分割する（文字が切れて消えないように）。"""
+    def fits(t: str) -> bool:
+        return len(wrap_text(t, font, max_width)) <= max_lines
+    out = []
+    for sent in split_sentences(text):
+        if fits(sent):
+            out.append(sent)
+            continue
+        clauses = [c for c in re.split(r"(?<=[、，,：:；;])", sent) if c]
+        buf = ""
+        for c in clauses:
+            if buf and not fits(buf + c):
+                out.append(buf)
+                buf = ""
+            buf += c
+            while not fits(buf):  # 読点がなく1つの節が長すぎるときは、行の区切りで強制的に分ける
+                lines = wrap_text(buf, font, max_width)
+                head = "".join(lines[:max_lines])
+                out.append(head)
+                buf = buf[len(head):]
+        if buf:
+            out.append(buf)
+    # 極端に短い断片（「。」だけなど）は前の字幕にまとめる
+    merged = []
+    for c in out:
+        if merged and len(c.strip()) <= 2 and fits(merged[-1] + c):
+            merged[-1] += c
+        else:
+            merged.append(c)
+    return merged or [text]
+
+
+def subtitle_timing(timeline: list[dict], font, max_width: int, max_lines: int, gap: float) -> list:
+    """各シーンの字幕を分割し、文字数に比例して表示時間を割り当てる。"""
+    subs = []
+    for sc in timeline:
+        if sc.get("sub_parts"):
+            # 字幕ごとに音声を作っているので、音声の区切りどおりに切り替える（ずれない）。
+            # 次の字幕までは前の字幕を出したままにし、最後の字幕はシーンの終わりまで表示する
+            sp = sc["sub_parts"]
+            for k, (a, b, x) in enumerate(sp):
+                end = sp[k + 1][0] if k + 1 < len(sp) else sc["duration"]
+                subs.append((sc["start"] + a, sc["start"] + end, x))
+            continue
+        parts = subtitle_chunks(sc["narration"], font, max_width, max_lines)
+        total_chars = sum(len(x) for x in parts) or 1
+        cur = sc["start"]
+        for k, x in enumerate(parts):
+            d = sc["voice_duration"] * len(x) / total_chars
+            subs.append((cur, cur + d + (gap if k == len(parts) - 1 else 0), x))
+            cur += d
+    return subs
+
+
 def smoothstep(x: float) -> float:
     x = min(max(x, 0.0), 1.0)
     return x * x * (3 - 2 * x)
@@ -1051,16 +1131,8 @@ class Renderer:
         else:
             self.sub_width, self.sub_center = 1640, W // 2
 
-        # 字幕: 文ごとに、文字数に比例して表示時間を割り当てる
-        self.subs = []
-        for t in timeline:
-            sents = split_sentences(t["narration"])
-            total_chars = sum(len(s) for s in sents)
-            cur = t["start"]
-            for k, s in enumerate(sents):
-                d = t["voice_duration"] * len(s) / total_chars
-                self.subs.append((cur, cur + d + (SCENE_GAP if k == len(sents) - 1 else 0), s))
-                cur += d
+        # 字幕: 2行に収まる長さに分けて、文字数に比例して表示時間を割り当てる
+        self.subs = subtitle_timing(timeline, SUB_FONT, self.sub_width, 2, SCENE_GAP)
         self._sub_cache: dict[int, Image.Image] = {}
 
     def _image(self, idx: int) -> Image.Image:
@@ -1394,8 +1466,9 @@ def plan_shorts(script: Script) -> list[Short]:
 def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) -> tuple[list[dict], Path]:
     tl, pieces, t = [], [], 0.0
     gap = np.zeros(int(SR * SHORT_GAP), dtype=np.float32)
+    font = load_font(66)
     for k, sc in enumerate(short.scenes):
-        audio, visemes = tts.synth(sc.narration)
+        audio, visemes, sub_parts = synth_with_subtitles(tts, sc.narration, font, SW - 90, 3)
         voice = len(audio) / SR
         dur = voice + SHORT_GAP
         if t + dur > SHORT_MAX_SEC and tl:
@@ -1404,7 +1477,7 @@ def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) 
         pieces += [audio, gap]
         tl.append({"index": k, "start": t, "duration": dur, "voice_duration": voice,
                    "narration": sc.narration, "expression": sc.expression, "visemes": visemes,
-                   "camera": ("zoom_in", "zoom_out")[k % 2],
+                   "sub_parts": sub_parts, "camera": ("zoom_in", "zoom_out")[k % 2],
                    "image": long_tl[sc.source_scene - 1]["image"]})
         t += dur
     path = WORK / f"short_{idx}_narration.wav"
@@ -1426,15 +1499,7 @@ class ShortRenderer:
         self.hook = self._render_hook(hook_text)
         self._src: dict[str, Image.Image] = {}
         self._bg: dict[str, Image.Image] = {}
-        self.subs = []
-        for sc in timeline:
-            sents = split_sentences(sc["narration"])
-            total_chars = sum(len(x) for x in sents)
-            cur = sc["start"]
-            for k, x in enumerate(sents):
-                d = sc["voice_duration"] * len(x) / total_chars
-                self.subs.append((cur, cur + d + (SHORT_GAP if k == len(sents) - 1 else 0), x))
-                cur += d
+        self.subs = subtitle_timing(timeline, self.sub_font, SW - 90, 3, SHORT_GAP)
         self._sub_cache: dict[int, Image.Image] = {}
 
     def _render_hook(self, text: str) -> Image.Image:
