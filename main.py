@@ -901,6 +901,53 @@ def split_sentences(text: str) -> list[str]:
     return merged or [text]
 
 
+def subtitle_chunks(text: str, font, max_width: int, max_lines: int = 2) -> list[str]:
+    """字幕1枚が max_lines 行に収まるよう、文を読点などの切れ目で分割する（文字が切れて消えないように）。"""
+    def fits(t: str) -> bool:
+        return len(wrap_text(t, font, max_width)) <= max_lines
+    out = []
+    for sent in split_sentences(text):
+        if fits(sent):
+            out.append(sent)
+            continue
+        clauses = [c for c in re.split(r"(?<=[、，,：:；;])", sent) if c]
+        buf = ""
+        for c in clauses:
+            if buf and not fits(buf + c):
+                out.append(buf)
+                buf = ""
+            buf += c
+            while not fits(buf):  # 読点がなく1つの節が長すぎるときは、行の区切りで強制的に分ける
+                lines = wrap_text(buf, font, max_width)
+                head = "".join(lines[:max_lines])
+                out.append(head)
+                buf = buf[len(head):]
+        if buf:
+            out.append(buf)
+    # 極端に短い断片（「。」だけなど）は前の字幕にまとめる
+    merged = []
+    for c in out:
+        if merged and len(c.strip()) <= 2 and fits(merged[-1] + c):
+            merged[-1] += c
+        else:
+            merged.append(c)
+    return merged or [text]
+
+
+def subtitle_timing(timeline: list[dict], font, max_width: int, max_lines: int, gap: float) -> list:
+    """各シーンの字幕を分割し、文字数に比例して表示時間を割り当てる。"""
+    subs = []
+    for sc in timeline:
+        parts = subtitle_chunks(sc["narration"], font, max_width, max_lines)
+        total_chars = sum(len(x) for x in parts) or 1
+        cur = sc["start"]
+        for k, x in enumerate(parts):
+            d = sc["voice_duration"] * len(x) / total_chars
+            subs.append((cur, cur + d + (gap if k == len(parts) - 1 else 0), x))
+            cur += d
+    return subs
+
+
 def smoothstep(x: float) -> float:
     x = min(max(x, 0.0), 1.0)
     return x * x * (3 - 2 * x)
@@ -1051,16 +1098,8 @@ class Renderer:
         else:
             self.sub_width, self.sub_center = 1640, W // 2
 
-        # 字幕: 文ごとに、文字数に比例して表示時間を割り当てる
-        self.subs = []
-        for t in timeline:
-            sents = split_sentences(t["narration"])
-            total_chars = sum(len(s) for s in sents)
-            cur = t["start"]
-            for k, s in enumerate(sents):
-                d = t["voice_duration"] * len(s) / total_chars
-                self.subs.append((cur, cur + d + (SCENE_GAP if k == len(sents) - 1 else 0), s))
-                cur += d
+        # 字幕: 2行に収まる長さに分けて、文字数に比例して表示時間を割り当てる
+        self.subs = subtitle_timing(timeline, SUB_FONT, self.sub_width, 2, SCENE_GAP)
         self._sub_cache: dict[int, Image.Image] = {}
 
     def _image(self, idx: int) -> Image.Image:
@@ -1426,15 +1465,7 @@ class ShortRenderer:
         self.hook = self._render_hook(hook_text)
         self._src: dict[str, Image.Image] = {}
         self._bg: dict[str, Image.Image] = {}
-        self.subs = []
-        for sc in timeline:
-            sents = split_sentences(sc["narration"])
-            total_chars = sum(len(x) for x in sents)
-            cur = sc["start"]
-            for k, x in enumerate(sents):
-                d = sc["voice_duration"] * len(x) / total_chars
-                self.subs.append((cur, cur + d + (SHORT_GAP if k == len(sents) - 1 else 0), x))
-                cur += d
+        self.subs = subtitle_timing(timeline, self.sub_font, SW - 90, 3, SHORT_GAP)
         self._sub_cache: dict[int, Image.Image] = {}
 
     def _render_hook(self, text: str) -> Image.Image:
