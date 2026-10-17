@@ -402,6 +402,7 @@ def build_script_prompt(research: str, feedback: str = "") -> str:
 # 構成・話し方の要件
 - ナレーションはすべて自然な日本語の話し言葉（です・ます調）。音声合成で読み上げるため、
   記号・絵文字・括弧書き・読み間違えやすい英字略語は使わない。
+- 数字は算用数字で書く（例: 1.5倍、65本、2024年、3000万円）。漢数字は「一番」「一緒」のような言葉の中だけで使う。
 - ナレーションの合計は約{TARGET_CHARS}文字（±10%）。これが動画の長さを決めるので必ず守る。
 - 冒頭の2〜3シーンで、企画の「つかみ」の内容を使って視聴者の興味を強く引く。
 - 章は4〜6個。各章は6〜10シーン。1シーンのナレーションは1〜3文、40〜90文字。
@@ -542,6 +543,7 @@ def expand_script(script: Script, research: str) -> Script:
 - 他の章の内容と重複させない。前後の章とつながるようにする。
 - 1シーンは1〜3文、40〜90文字。シーン数は{max(6, round(want / 65))}前後。
 - ナレーションは自然な日本語の話し言葉（です・ます調）。記号・絵文字・括弧書きは使わない。
+- 数字は算用数字で書く（例: 1.5倍、65本、2024年）。
 - expression は normal / smile / surprised / thinking のいずれか（6割以上 normal）。
 - camera は zoom_in / zoom_out / pan_left / pan_right を織り交ぜる。
 - image_prompt は英語で、そのシーンの内容が一目で分かる具体的な場面。文字・ロゴ・実在の有名人は含めない。
@@ -606,6 +608,21 @@ def decode_audio(path_or_bytes, tempo: float = 1.0) -> np.ndarray:
     return np.frombuffer(out, dtype=np.float32).copy()
 
 
+# 読み上げ用の書き換え（字幕には影響しない）。音声合成が読み間違えやすい言葉を直す
+_READING_FIXES = [
+    # 「役立った方は」「ご覧になった方も」のように、動詞のあとの「方」で人を指すときは「かた」と読ませる。
+    # 「〜した方がいい」（ほう）は「が」が続くので対象外
+    (re.compile(r"(?<=[たるいうくすつぬむぶぐてだ])方(?=(は|も|へ|には|にも|や|の|から|ぜひ|、))"), "かた"),
+    (re.compile(r"(?<=[ご御])覧になった方"), "らんになったかた"),
+]
+
+
+def reading_fix(text: str) -> str:
+    for pat, rep in _READING_FIXES:
+        text = pat.sub(rep, text)
+    return text
+
+
 class TTS:
     def __init__(self):
         self.engine = "gtts"
@@ -639,6 +656,7 @@ class TTS:
     def synth(self, text: str) -> tuple[np.ndarray, list | None]:
         """音声と口パク用のタイミング [(開始秒, 終了秒, 口の形), ...] を返す。
         口の形は a/i/u/e/o/n（n=閉じ）。gTTS ではタイミングが取れないため None。"""
+        text = reading_fix(text)  # 読み間違えやすい言葉を、読み上げ用だけ書き換える（字幕は元のまま）
         for attempt in range(3):
             try:
                 if self.engine == "voicevox":
@@ -889,9 +907,99 @@ def wrap_text(text: str, font, max_width: int) -> list[str]:
     return lines
 
 
+# ---------- 字幕の漢数字 → 算用数字（表示だけ。読み上げは元の文のまま） ----------
+
+_KDIGIT = {"〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_KSMALL = {"十": 10, "百": 100, "千": 1000}
+_KBIG = "万億兆"
+_KNUM_CHARS = "〇零一二三四五六七八九十百千万億兆"
+# 数字のあとに続くと「数量」と判断できる単位（1文字の漢数字はこれが続くときだけ変換する）
+_COUNTERS = ("パーセント", "メートル", "キロ", "センチ", "ミリ", "トン", "ドル", "ユーロ", "ポイント", "カ月", "ヶ月", "か月",
+             "%", "％", "年", "月", "日", "時間", "分", "秒", "歳", "才", "円", "人", "本", "個", "件", "回", "倍", "隻", "機",
+             "台", "両", "名", "社", "国", "階", "位", "点", "割", "枚", "冊", "匹", "頭", "羽", "杯", "週", "度", "号", "条",
+             "番目", "つ", "万", "億", "兆", "千", "百", "km", "kg", "m", "g")
+# 変換すると意味が変わる・不自然になる言葉（そのまま漢字で残す）
+_KEEP = ("一番", "一度", "一緒", "一方", "一部", "一般", "一時", "一体", "一気", "一斉", "一応", "一切", "一層", "一旦",
+         "一生", "一定", "一致", "一流", "一種", "一面", "一見", "一瞬", "一言", "一同", "一家", "一行", "一員", "一環",
+         "一目", "一人", "一つ", "一日中", "一年中", "唯一", "統一", "同一", "万一", "十分", "十字", "一石二鳥", "二人三脚",
+         "三日坊主", "七五三", "八百屋", "八百長", "千差万別", "百聞", "一石", "四季", "四方", "八方", "二度と", "一向",
+         "五月雨", "一長一短", "十人十色", "九死", "千載", "万全", "万能", "万歳", "億劫", "百貨", "千羽", "四六時中",
+         "第一次世界大戦", "第二次世界大戦", "第一人者", "第一線", "第一印象")
+
+
+def _parse_small(s: str) -> int:
+    """「三千五百二十」や「二〇二四」のような、万未満の漢数字を数にする。"""
+    if s and all(c in _KDIGIT for c in s):           # 位取りのない並び（二〇二四）
+        return int("".join(str(_KDIGIT[c]) for c in s))
+    total, cur = 0, 0
+    for c in s:
+        if c in _KDIGIT:
+            cur = _KDIGIT[c]
+        elif c in _KSMALL:
+            total += (cur or 1) * _KSMALL[c]
+            cur = 0
+    return total + cur
+
+
+def _kanji_to_arabic(s: str) -> str:
+    """「一億二千万」→「1億2000万」、「六十五」→「65」。万・億・兆は単位として残す。"""
+    out, buf = "", ""
+    for c in s:
+        if c in _KBIG:
+            out += (str(_parse_small(buf)) if buf else "1") + c
+            buf = ""
+        else:
+            buf += c
+    if buf:
+        out += str(_parse_small(buf))
+    return out
+
+
+def _overlaps_keep_word(text: str, s: int, e: int) -> bool:
+    """text[s:e] が「一番」「十分」などの変換しない言葉と重なっているか。"""
+    for k in _KEEP:
+        start = text.find(k, max(0, s - len(k)))
+        while start != -1 and start < e:
+            if start + len(k) > s:
+                return True
+            start = text.find(k, start + 1)
+    return False
+
+
+_NUM_RE = re.compile(rf"[{_KNUM_CHARS}]+(?:点[〇零一二三四五六七八九]+)?")
+
+
+def display_numbers(text: str) -> str:
+    """字幕の表示用に、数量を表す漢数字を算用数字にする（例: 一点五→1.5、六十五本→65本、二〇二四年→2024年）。
+    「一番」「一緒」「十分」などの言葉は変換しない。"""
+    out, pos = [], 0
+    for m in _NUM_RE.finditer(text):
+        s, e = m.start(), m.end()
+        token = m.group()
+        before, after = text[max(0, s - 4):s], text[e:e + 5]
+        if _overlaps_keep_word(text, s, e) or before.endswith(("何", "数", "幾")):
+            continue
+        int_part, _, dec_part = token.partition("点")
+        numeric_like = len(int_part) >= 2 or dec_part or after.startswith(_COUNTERS) or before.endswith("第")
+        if not numeric_like or (len(int_part) == 1 and int_part in _KBIG + "千百十"):
+            continue
+        if int_part and int_part[0] in _KBIG:  # 「万が一」などの先頭が単位の語は対象外
+            continue
+        try:
+            conv = _kanji_to_arabic(int_part)
+            if dec_part:
+                conv += "." + "".join(str(_KDIGIT[c]) for c in dec_part)
+        except Exception:
+            continue
+        out.append(text[pos:s] + conv)
+        pos = e
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def render_subtitle(text: str, max_width: int = 1640, center_x: int = W // 2) -> Image.Image:
     """縁取り付きの字幕を RGBA 画像として描画する（ImageMagick 不要）。"""
-    lines = wrap_text(text, SUB_FONT, max_width)[:3]
+    lines = wrap_text(display_numbers(text), SUB_FONT, max_width)[:3]
     line_h = int(SUB_FONT.size * 1.35)
     img = Image.new("RGBA", (W, line_h * len(lines) + 40), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -1442,6 +1550,7 @@ def plan_shorts(script: Script) -> list[Short]:
 - 事実は本編の台本に書かれていることだけを使う。
 - 最後のシーンは「続きは本編で詳しく解説しています」のように、本編へ自然に誘導して終える。
 - 記号・絵文字・括弧書き・読み間違えやすい英字略語は使わない（音声合成で読み上げるため）。
+- 数字は算用数字で書く（例: 1.5倍、65本、2024年）。
 - source_scene には、そのシーンの内容に最も合う本編シーンの番号を入れる。同じ番号を3回以上続けない。
 - expression は、意外な事実→surprised、問いかけ→thinking、締め→smile、それ以外→normal。半分以上は normal にする。
 - hook_text は、画面上部に大きく出す見出し。タイトルより短く、強い言葉で。"""
@@ -1566,7 +1675,7 @@ class ShortRenderer:
         for i, (s, e, text) in enumerate(self.subs):
             if s <= t < e:
                 if i not in self._sub_cache:
-                    lines = wrap_text(text, self.sub_font, SW - 90)[:3]
+                    lines = wrap_text(display_numbers(text), self.sub_font, SW - 90)[:3]
                     line_h = int(self.sub_font.size * 1.32)
                     img = Image.new("RGBA", (SW, line_h * len(lines) + 30), (0, 0, 0, 0))
                     d = ImageDraw.Draw(img)
