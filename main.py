@@ -608,6 +608,21 @@ def decode_audio(path_or_bytes, tempo: float = 1.0) -> np.ndarray:
     return np.frombuffer(out, dtype=np.float32).copy()
 
 
+# 読み上げ用の書き換え（字幕には影響しない）。音声合成が読み間違えやすい言葉を直す
+_READING_FIXES = [
+    # 「役立った方は」「ご覧になった方も」のように、動詞のあとの「方」で人を指すときは「かた」と読ませる。
+    # 「〜した方がいい」（ほう）は「が」が続くので対象外
+    (re.compile(r"(?<=[たるいうくすつぬむぶぐてだ])方(?=(は|も|へ|には|にも|や|の|から|ぜひ|、))"), "かた"),
+    (re.compile(r"(?<=[ご御])覧になった方"), "らんになったかた"),
+]
+
+
+def reading_fix(text: str) -> str:
+    for pat, rep in _READING_FIXES:
+        text = pat.sub(rep, text)
+    return text
+
+
 class TTS:
     def __init__(self):
         self.engine = "gtts"
@@ -641,6 +656,7 @@ class TTS:
     def synth(self, text: str) -> tuple[np.ndarray, list | None]:
         """音声と口パク用のタイミング [(開始秒, 終了秒, 口の形), ...] を返す。
         口の形は a/i/u/e/o/n（n=閉じ）。gTTS ではタイミングが取れないため None。"""
+        text = reading_fix(text)  # 読み間違えやすい言葉を、読み上げ用だけ書き換える（字幕は元のまま）
         for attempt in range(3):
             try:
                 if self.engine == "voicevox":
