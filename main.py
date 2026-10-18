@@ -401,7 +401,8 @@ def build_script_prompt(research: str, feedback: str = "") -> str:
 
 # 構成・話し方の要件
 - ナレーションはすべて自然な日本語の話し言葉（です・ます調）。音声合成で読み上げるため、
-  記号・絵文字・括弧書き・読み間違えやすい英字略語は使わない。
+  記号・絵文字・括弧書きは使わない。
+- FBI・NATO・AI・GDP などの英字の略語や固有名詞は、カタカナにせず英字のまま書く（読み方はプログラム側で調整する）。
 - 数字は算用数字で書く（例: 1.5倍、65本、2024年、3000万円）。漢数字は「一番」「一緒」のような言葉の中だけで使う。
 - ナレーションの合計は約{TARGET_CHARS}文字（±10%）。これが動画の長さを決めるので必ず守る。
 - 冒頭の2〜3シーンで、企画の「つかみ」の内容を使って視聴者の興味を強く引く。
@@ -616,11 +617,23 @@ _READING_FIXES = [
     (re.compile(r"(?<=[ご御])覧になった方"), "らんになったかた"),
 ]
 
+# 1文字ずつではなく、単語として読む英字の略語（それ以外の FBI・CIA・GDP などは1文字ずつ読まれる）
+_ACRONYM_WORDS = {
+    "NATO": "ナトー", "NASA": "ナサ", "JAXA": "ジャクサ", "UNESCO": "ユネスコ", "UNICEF": "ユニセフ",
+    "OPEC": "オペック", "ASEAN": "アセアン", "APEC": "エーペック", "OECD": "オーイーシーディー",
+    "COVID": "コビッド", "WHO": "ダブリューエイチオー", "JR": "ジェイアール", "SNS": "エスエヌエス",
+    "ICBM": "アイシービーエム", "SLBM": "エスエルビーエム", "AEGIS": "イージス", "RIMPAC": "リムパック",
+    "QUAD": "クアッド", "TikTok": "ティックトック", "YouTube": "ユーチューブ", "iPhone": "アイフォーン",
+    "Google": "グーグル", "Apple": "アップル", "Amazon": "アマゾン", "Netflix": "ネットフリックス",
+    "ChatGPT": "チャットジーピーティー", "OpenAI": "オープンエーアイ",
+}
+_ACRONYM_RE = re.compile(r"(?<![A-Za-z])(" + "|".join(sorted(map(re.escape, _ACRONYM_WORDS), key=len, reverse=True)) + r")(?![A-Za-z])")
+
 
 def reading_fix(text: str) -> str:
     for pat, rep in _READING_FIXES:
         text = pat.sub(rep, text)
-    return text
+    return _ACRONYM_RE.sub(lambda m: _ACRONYM_WORDS[m.group(1)], text)
 
 
 class TTS:
@@ -997,9 +1010,50 @@ def display_numbers(text: str) -> str:
     return "".join(out)
 
 
+# ---------- 字幕の「エフビーアイ」→「FBI」（AI がカタカナで書いてしまった略語を、表示だけ英字に戻す） ----------
+
+_LETTER_KANA = [  # 長いものから順に照合する
+    ("ダブリュー", "W"), ("エックス", "X"), ("エイチ", "H"), ("エッチ", "H"), ("ジェイ", "J"), ("ジェー", "J"),
+    ("ディー", "D"), ("ティー", "T"), ("キュー", "Q"), ("アール", "R"), ("ゼット", "Z"), ("ヴィー", "V"),
+    ("エー", "A"), ("エイ", "A"), ("ビー", "B"), ("シー", "C"), ("イー", "E"), ("エフ", "F"), ("ジー", "G"),
+    ("アイ", "I"), ("ケー", "K"), ("ケイ", "K"), ("エル", "L"), ("エム", "M"), ("エヌ", "N"), ("オー", "O"),
+    ("ピー", "P"), ("エス", "S"), ("ユー", "U"), ("ブイ", "V"), ("ワイ", "Y"),
+]
+_KATA_RUN = re.compile(r"[ァ-ヴー]+")
+_NOT_ACRONYM = {"オーケー", "アイアイ", "エスエス", "ユーユー"}
+
+
+def _kana_to_letters(run: str) -> str | None:
+    """カタカナの並びが、アルファベットの読み（エフ・ビー・アイ…）だけでできていれば英字にする。"""
+    out, i = "", 0
+    while i < len(run):
+        for kana, letter in _LETTER_KANA:
+            if run.startswith(kana, i):
+                out += letter
+                i += len(kana)
+                break
+        else:
+            return None
+    return out if len(out) >= 2 else None
+
+
+def display_alphabet(text: str) -> str:
+    def repl(m):
+        run = m.group()
+        if run in _NOT_ACRONYM:
+            return run
+        return _kana_to_letters(run) or run
+    return _KATA_RUN.sub(repl, text)
+
+
+def display_text(text: str) -> str:
+    """字幕の表示用の整形（漢数字→算用数字、カタカナの略語→英字）。読み上げには影響しない。"""
+    return display_alphabet(display_numbers(text))
+
+
 def render_subtitle(text: str, max_width: int = 1640, center_x: int = W // 2) -> Image.Image:
     """縁取り付きの字幕を RGBA 画像として描画する（ImageMagick 不要）。"""
-    lines = wrap_text(display_numbers(text), SUB_FONT, max_width)[:3]
+    lines = wrap_text(display_text(text), SUB_FONT, max_width)[:3]
     line_h = int(SUB_FONT.size * 1.35)
     img = Image.new("RGBA", (W, line_h * len(lines) + 40), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -1549,7 +1603,8 @@ def plan_shorts(script: Script) -> list[Short]:
 - ナレーション合計は{chars_min}〜{chars_max}文字。1シーンは1〜2文、20〜60文字。6〜10シーン。
 - 事実は本編の台本に書かれていることだけを使う。
 - 最後のシーンは「続きは本編で詳しく解説しています」のように、本編へ自然に誘導して終える。
-- 記号・絵文字・括弧書き・読み間違えやすい英字略語は使わない（音声合成で読み上げるため）。
+- 記号・絵文字・括弧書きは使わない（音声合成で読み上げるため）。
+- FBI・NATO・AI などの英字の略語は、カタカナにせず英字のまま書く。
 - 数字は算用数字で書く（例: 1.5倍、65本、2024年）。
 - source_scene には、そのシーンの内容に最も合う本編シーンの番号を入れる。同じ番号を3回以上続けない。
 - expression は、意外な事実→surprised、問いかけ→thinking、締め→smile、それ以外→normal。半分以上は normal にする。
@@ -1675,7 +1730,7 @@ class ShortRenderer:
         for i, (s, e, text) in enumerate(self.subs):
             if s <= t < e:
                 if i not in self._sub_cache:
-                    lines = wrap_text(display_numbers(text), self.sub_font, SW - 90)[:3]
+                    lines = wrap_text(display_text(text), self.sub_font, SW - 90)[:3]
                     line_h = int(self.sub_font.size * 1.32)
                     img = Image.new("RGBA", (SW, line_h * len(lines) + 30), (0, 0, 0, 0))
                     d = ImageDraw.Draw(img)
