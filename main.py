@@ -45,7 +45,7 @@ FADE = 0.6                 # クロスフェード（秒）
 SRC_SCALE = 1.18           # ズーム・パン用に元画像を少し大きめに用意する倍率
 
 TARGET_MINUTES = float(os.getenv("TARGET_MINUTES", "8"))
-CHARS_PER_MIN = int(os.getenv("CHARS_PER_MIN", "400"))  # 1分あたりのナレーション文字数の目安（VOICEVOX 1.12倍速）
+CHARS_PER_MIN = int(os.getenv("CHARS_PER_MIN", "375"))  # 1分あたりのナレーション文字数の目安（VOICEVOX 1.05倍速）
 TARGET_CHARS = int(TARGET_MINUTES * CHARS_PER_MIN)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -70,9 +70,11 @@ IMAGE_STYLE = os.getenv(
 
 VOICEVOX_URL = os.getenv("VOICEVOX_URL", "http://localhost:50021")
 VOICEVOX_SPEAKER = int(os.getenv("VOICEVOX_SPEAKER") or "12")  # 12 = 白上虎太郎（ふつう）。Variables で変更可
-VOICEVOX_SPEED = float(os.getenv("VOICEVOX_SPEED", "1.12"))
+VOICEVOX_SPEED = float(os.getenv("VOICEVOX_SPEED", "1.05"))  # 視聴者の中心が50代以上なので、少しゆっくりめ
 TTS_ENGINE = os.getenv("TTS_ENGINE", "voicevox")               # voicevox / gtts
 
+SUB_FONT_SIZE = int(os.getenv("SUB_FONT_SIZE", "64"))          # 本編の字幕の大きさ（見やすさ重視で大きめ）
+SHORT_SUB_FONT_SIZE = int(os.getenv("SHORT_SUB_FONT_SIZE", "72"))  # ショートの字幕の大きさ
 FONT_PATH = os.getenv("FONT_PATH", "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
 BGM_PATH = Path(os.getenv("BGM_PATH", "assets/bgm.mp3"))
 BGM_VOLUME = float(os.getenv("BGM_VOLUME", "0.10"))
@@ -746,7 +748,7 @@ def write_wav(path: Path, audio: np.ndarray) -> None:
 
 def main_subtitle_layout() -> tuple:
     """本編の字幕のフォント・横幅・行数（キャラがいるときは、キャラと重ならない幅）。"""
-    font = load_font(58)
+    font = load_font(SUB_FONT_SIZE)
     char = Character(CHARACTER_HEIGHT)
     width = (W - char.width - 30) - 80 if char.enabled else 1640
     return font, width, 2
@@ -1335,7 +1337,7 @@ def voice_envelope(narration: np.ndarray, n_frames: int) -> np.ndarray:
 class Renderer:
     def __init__(self, timeline: list[dict], narration: np.ndarray | None = None):
         global SUB_FONT, LABEL_FONT
-        SUB_FONT, LABEL_FONT = load_font(58), load_font(34)
+        SUB_FONT, LABEL_FONT = load_font(SUB_FONT_SIZE), load_font(34)
         self.tl = timeline
         self.total = timeline[-1]["start"] + timeline[-1]["duration"]
         self.n_frames = int(self.total * FPS) + 1
@@ -1690,7 +1692,7 @@ def plan_shorts(script: Script) -> list[Short]:
 def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) -> tuple[list[dict], Path]:
     tl, pieces, t = [], [], 0.0
     gap = np.zeros(int(SR * SHORT_GAP), dtype=np.float32)
-    font = load_font(66)
+    font = load_font(SHORT_SUB_FONT_SIZE)
     for k, sc in enumerate(short.scenes):
         audio, visemes, sub_parts = synth_with_subtitles(tts, sc.narration, font, SW - 90, 3)
         voice = len(audio) / SR
@@ -1716,7 +1718,7 @@ class ShortRenderer:
         self.tl = timeline
         self.total = timeline[-1]["start"] + timeline[-1]["duration"]
         self.n_frames = int(self.total * FPS) + 1
-        self.sub_font = load_font(66)
+        self.sub_font = load_font(SHORT_SUB_FONT_SIZE)
         self.char = Character(SHORT_CHAR_H)
         self.env = voice_envelope(narration, self.n_frames)
         self.mouth = mouth_track(timeline, self.env, self.n_frames) if self.char.lipsync else None

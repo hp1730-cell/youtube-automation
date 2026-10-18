@@ -18,6 +18,13 @@ log = logging.getLogger("analyze")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 CHANNEL_THEME = os.getenv("CHANNEL_THEME") or "幅広いジャンルの雑学・解説（アニメ調イラスト＋ナレーション形式）"
 JST = timezone(timedelta(hours=9))
+# 週1回の「50歳以上向け」の日（0=月曜 … 5=土曜, 6=日曜）。-1 にすると無効
+SENIOR_WEEKDAY = int(os.getenv("SENIOR_WEEKDAY", "5"))
+SENIOR_LABEL = "🧓 50歳以上向けの週1企画"
+
+
+def is_senior_day() -> bool:
+    return SENIOR_WEEKDAY >= 0 and datetime.now(JST).weekday() == SENIOR_WEEKDAY
 
 
 # ---------- トレンド情報の取得（LLM は最新情報を知らないため、実データを渡す） ----------
@@ -64,6 +71,20 @@ def fetch_youtube_popular(n: int = 25) -> list[str]:
 
 # ---------- 企画立案 ----------
 
+def senior_rule() -> str:
+    if not is_senior_day():
+        return ""
+    return """
+# 今日は週1回の「50歳以上向け」の日
+- 3つ目の企画（plans の3番目）は、50代以上の男性に向けた企画にする。トレンドにこだわらなくてよい。
+- テーマの例：年金・退職金・老後のお金、昭和の出来事や懐かしい話、日本や世界の歴史の裏話、自衛隊・防衛、
+  定年後の暮らしや趣味、身近な制度の変更点、健康（医学的に根拠のある内容だけ。断定せず「リスクを下げる」と表現する）
+- 投資の勧誘や、特定の商品・サービスをすすめる内容、不安をあおるだけの内容にはしない。
+- タイトルは、この世代が自分ごととして思わずクリックしたくなる言葉にする（例：「60代から知らないと損する…」）。
+- 1つ目と2つ目は、いつもどおりトレンドをもとにした企画にする。
+"""
+
+
 def build_prompt(trends: list[str], popular: list[str]) -> str:
     today = datetime.now(JST).strftime("%Y年%m月%d日")
     trend_txt = "\n".join(f"- {t}" for t in trends) or "（取得できませんでした）"
@@ -85,7 +106,7 @@ def build_prompt(trends: list[str], popular: list[str]) -> str:
 - 速報性に頼りすぎず、数週間は見られる「解説・雑学・まとめ」の切り口にする。
 - 事実確認が難しいゴシップ、事件の被害者、政治的に偏った主張は避ける。
 - 3つは互いにジャンルや切り口を変える。
-
+{senior_rule()}
 # 出力
 次の形式の JSON のみを出力してください。
 {{"plans": [
@@ -148,10 +169,15 @@ def main():
         sys.exit(1)
 
     today = datetime.now(JST).strftime("%m/%d")
+    senior = is_senior_day()
     post_message(f"📅 **{today} の企画案です**\n作りたい企画の番号（1〜3）をこのチャンネルに送信してください。"
-                 f"12時台までに返信すると、動画を作成して非公開でアップロードします。")
+                 f"12時台までに返信すると、動画を作成して非公開でアップロードします。"
+                 + (f"\n今日は{SENIOR_LABEL}の日です（企画3）。" if senior else ""))
     for i, p in enumerate(plans, 1):
-        post_message(format_plan(i, p))
+        text = format_plan(i, p)
+        if senior and i == 3:
+            text = text.replace("\n", f"\n{SENIOR_LABEL}\n", 1)
+        post_message(text)
     log.info("企画案の送信が完了しました。")
 
 
