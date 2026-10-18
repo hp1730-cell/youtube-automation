@@ -903,8 +903,42 @@ SUB_FONT = None
 LABEL_FONT = None
 
 
-def wrap_text(text: str, font, max_width: int) -> list[str]:
-    """日本語を1文字単位で折り返す。句読点が行頭に来ないよう調整。"""
+_BUDOUX = None
+
+
+def phrases(text: str) -> list[str]:
+    """日本語を文節（「技術を」「進めますが」のようなまとまり）に分ける。
+    BudouX が使えればそれを使い、なければ助詞や句読点の後ろで区切る簡易版を使う。"""
+    global _BUDOUX
+    if not text:
+        return []
+    if _BUDOUX is None:
+        try:
+            import budoux
+            _BUDOUX = budoux.load_default_japanese_parser()
+        except Exception:
+            _BUDOUX = False
+            log.warning("BudouX が使えないため、簡易的な文節の区切りを使います。")
+    if _BUDOUX:
+        parts = _BUDOUX.parse(text)
+        if "".join(parts) == text:
+            return parts
+    # 簡易版：句読点のあと、または助詞のあとに漢字・カタカナ・英数字が続く位置で区切る
+    # （「はるかに」の「は」のように、後ろがひらがなの場合は単語の途中なので区切らない）
+    parts, cur = [], ""
+    for i, ch in enumerate(text):
+        cur += ch
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if ch in "、。！？!?」』）" or (ch in "をはがにでとへもや" and re.match(r"[ァ-ヶ一-龠々A-Za-z0-9]", nxt or "")):
+            parts.append(cur)
+            cur = ""
+    if cur:
+        parts.append(cur)
+    return parts or [text]
+
+
+def _char_wrap(text: str, font, max_width: int) -> list[str]:
+    """1文字単位の折り返し（1つの文節が1行に入りきらないときだけ使う）。"""
     lines, cur = [], ""
     for ch in text:
         if font.getlength(cur + ch) > max_width and cur:
@@ -915,6 +949,27 @@ def wrap_text(text: str, font, max_width: int) -> list[str]:
             cur = ch
         else:
             cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def wrap_text(text: str, font, max_width: int) -> list[str]:
+    """日本語を文節の切れ目で折り返す（「進｜めます」のように単語の途中で改行しない）。"""
+    lines, cur = [], ""
+    for ph in phrases(text):
+        if font.getlength(cur + ph) <= max_width:
+            cur += ph
+            continue
+        if cur:
+            lines.append(cur)
+            cur = ""
+        if font.getlength(ph) <= max_width:
+            cur = ph
+        else:  # 1つの文節が長すぎるときだけ文字単位で折り返す
+            parts = _char_wrap(ph, font, max_width)
+            lines += parts[:-1]
+            cur = parts[-1]
     if cur:
         lines.append(cur)
     return lines
@@ -1104,9 +1159,14 @@ def subtitle_chunks(text: str, font, max_width: int, max_lines: int = 2) -> list
                 out.append(buf)
                 buf = ""
             buf += c
-            while not fits(buf):  # 読点がなく1つの節が長すぎるときは、行の区切りで強制的に分ける
-                lines = wrap_text(buf, font, max_width)
-                head = "".join(lines[:max_lines])
+            while not fits(buf):  # 読点がなく1つの節が長すぎるときは、文節の切れ目で分ける
+                head = ""
+                for ph in phrases(buf):
+                    if head and not fits(head + ph):
+                        break
+                    head += ph
+                if not head or head == buf:  # 念のため（1文節が2行に収まらない場合）
+                    head = "".join(wrap_text(buf, font, max_width)[:max_lines])
                 out.append(head)
                 buf = buf[len(head):]
         if buf:
