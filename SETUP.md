@@ -149,6 +149,7 @@ Actions タブ → 「YouTube Auto-Production Pipeline」→ **Run workflow** �
 | `CHARS_PER_MIN` | 375 | 1分あたりのナレーション文字数の目安。動画が目標より短い・長いときは、ログの「実測 ○文字/分」の値にする |
 | `SUB_FONT_SIZE` | 64 | 本編の字幕の大きさ（ショートは `SHORT_SUB_FONT_SIZE`、既定 72） |
 | `SENIOR_WEEKDAY` | 5 | 企画3を「50歳以上向け」にする曜日（0=月曜…5=土曜、6=日曜、-1で無効）。企画案のジョブの env に追加して変更 |
+| `SELFHELP_WEEKDAY` | 6 | 企画3を「20〜30代向けの自己啓発」にする曜日（既定は日曜、-1で無効）。企画案のジョブの env に追加して変更 |
 | `SHORTS_COUNT` | 2 | 本編と一緒に作るショート動画の本数（0 で作らない） |
 | `SHORT_MAX_SEC` | 58 | ショートの最大の長さ（秒） |
 | `GEMINI_MODELS` | `gemini-2.5-flash,gemini-2.5-flash-lite` | 使うモデル（左から順に試行）。新しいモデルが出たら先頭に追加 |

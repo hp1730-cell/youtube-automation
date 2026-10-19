@@ -18,13 +18,45 @@ log = logging.getLogger("analyze")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 CHANNEL_THEME = os.getenv("CHANNEL_THEME") or "幅広いジャンルの雑学・解説（アニメ調イラスト＋ナレーション形式）"
 JST = timezone(timedelta(hours=9))
-# 週1回の「50歳以上向け」の日（0=月曜 … 5=土曜, 6=日曜）。-1 にすると無効
-SENIOR_WEEKDAY = int(os.getenv("SENIOR_WEEKDAY", "5"))
-SENIOR_LABEL = "🧓 50歳以上向けの週1企画"
+# 週1回の特別枠（企画3をその枠の企画にする）。曜日は 0=月曜 … 5=土曜, 6=日曜。-1 にすると無効
+SENIOR_WEEKDAY = int(os.getenv("SENIOR_WEEKDAY", "5"))      # 50歳以上向け
+SELFHELP_WEEKDAY = int(os.getenv("SELFHELP_WEEKDAY", "6"))  # 20〜30代向けの自己啓発
+
+SENIOR_RULE = """
+# 今日は週1回の「50歳以上向け」の日
+- 3つ目の企画（plans の3番目）は、50代以上の男性に向けた企画にする。トレンドにこだわらなくてよい。
+- テーマの例：年金・退職金・老後のお金、昭和の出来事や懐かしい話、日本や世界の歴史の裏話、自衛隊・防衛、
+  定年後の暮らしや趣味、身近な制度の変更点、健康（医学的に根拠のある内容だけ。断定せず「リスクを下げる」と表現する）
+- 投資の勧誘や、特定の商品・サービスをすすめる内容、不安をあおるだけの内容にはしない。
+- タイトルは、この世代が自分ごととして思わずクリックしたくなる言葉にする（例：「60代から知らないと損する…」）。
+- 1つ目と2つ目は、いつもどおりトレンドをもとにした企画にする。
+"""
+
+SELFHELP_RULE = """
+# 今日は週1回の「20〜30代向けの自己啓発」の日
+- 3つ目の企画（plans の3番目）は、20〜30代に向けた自己啓発の企画にする。トレンドにこだわらなくてよい。
+- テーマの例：仕事の進め方、習慣づくり、時間の使い方、お金の基礎知識、人間関係、学び方、キャリアの考え方、
+  歴史上の人物や実在の経営者・アスリートの具体的なエピソードから学ぶこと
+- 中身のある企画にするため、必ず具体的な根拠を軸にする（心理学などの研究結果、統計データ、実在の人物の実話）。
+  「前向きに生きよう」「感謝が大切」のような一般論だけの企画にはしない。
+- 根性論、断定的な「成功の法則」、怪しい副業・投資・情報商材につながる内容、医療的な助言（メンタルの不調の治し方など）は避ける。
+- タイトルは、20〜30代が自分ごととして思わずクリックしたくなる言葉にする（例：「20代のうちにやめるべき3つの習慣」）。
+- 1つ目と2つ目は、いつもどおりトレンドをもとにした企画にする。
+"""
+
+WEEKLY_SLOTS = [  # (曜日, Discord に出す印, AI への指示)
+    (SENIOR_WEEKDAY, "🧓 50歳以上向けの週1企画", SENIOR_RULE),
+    (SELFHELP_WEEKDAY, "🌱 20〜30代向け・自己啓発の週1企画", SELFHELP_RULE),
+]
 
 
-def is_senior_day() -> bool:
-    return SENIOR_WEEKDAY >= 0 and datetime.now(JST).weekday() == SENIOR_WEEKDAY
+def today_slot():
+    """今日が特別枠の曜日なら (印, 指示) を返す。"""
+    wd = datetime.now(JST).weekday()
+    for day, label, rule in WEEKLY_SLOTS:
+        if day >= 0 and day == wd:
+            return label, rule
+    return None
 
 
 # ---------- トレンド情報の取得（LLM は最新情報を知らないため、実データを渡す） ----------
@@ -71,18 +103,9 @@ def fetch_youtube_popular(n: int = 25) -> list[str]:
 
 # ---------- 企画立案 ----------
 
-def senior_rule() -> str:
-    if not is_senior_day():
-        return ""
-    return """
-# 今日は週1回の「50歳以上向け」の日
-- 3つ目の企画（plans の3番目）は、50代以上の男性に向けた企画にする。トレンドにこだわらなくてよい。
-- テーマの例：年金・退職金・老後のお金、昭和の出来事や懐かしい話、日本や世界の歴史の裏話、自衛隊・防衛、
-  定年後の暮らしや趣味、身近な制度の変更点、健康（医学的に根拠のある内容だけ。断定せず「リスクを下げる」と表現する）
-- 投資の勧誘や、特定の商品・サービスをすすめる内容、不安をあおるだけの内容にはしない。
-- タイトルは、この世代が自分ごととして思わずクリックしたくなる言葉にする（例：「60代から知らないと損する…」）。
-- 1つ目と2つ目は、いつもどおりトレンドをもとにした企画にする。
-"""
+def slot_rule() -> str:
+    slot = today_slot()
+    return slot[1] if slot else ""
 
 
 def build_prompt(trends: list[str], popular: list[str]) -> str:
@@ -106,7 +129,7 @@ def build_prompt(trends: list[str], popular: list[str]) -> str:
 - 速報性に頼りすぎず、数週間は見られる「解説・雑学・まとめ」の切り口にする。
 - 事実確認が難しいゴシップ、事件の被害者、政治的に偏った主張は避ける。
 - 3つは互いにジャンルや切り口を変える。
-{senior_rule()}
+{slot_rule()}
 # 出力
 次の形式の JSON のみを出力してください。
 {{"plans": [
@@ -169,14 +192,14 @@ def main():
         sys.exit(1)
 
     today = datetime.now(JST).strftime("%m/%d")
-    senior = is_senior_day()
+    slot = today_slot()
     post_message(f"📅 **{today} の企画案です**\n作りたい企画の番号（1〜3）をこのチャンネルに送信してください。"
                  f"12時台までに返信すると、動画を作成して非公開でアップロードします。"
-                 + (f"\n今日は{SENIOR_LABEL}の日です（企画3）。" if senior else ""))
+                 + (f"\n今日は「{slot[0]}」の日です（企画3）。" if slot else ""))
     for i, p in enumerate(plans, 1):
         text = format_plan(i, p)
-        if senior and i == 3:
-            text = text.replace("\n", f"\n{SENIOR_LABEL}\n", 1)
+        if slot and i == 3:
+            text = text.replace("\n", f"\n{slot[0]}\n", 1)
         post_message(text)
     log.info("企画案の送信が完了しました。")
 
