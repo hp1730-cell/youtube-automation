@@ -20,7 +20,7 @@ CHANNEL_THEME = os.getenv("CHANNEL_THEME") or "幅広いジャンルの雑学・
 JST = timezone(timedelta(hours=9))
 # 週1回の特別枠（企画3をその枠の企画にする）。曜日は 0=月曜 … 5=土曜, 6=日曜。-1 にすると無効
 SENIOR_WEEKDAY = int(os.getenv("SENIOR_WEEKDAY", "5"))      # 50歳以上向け
-SELFHELP_WEEKDAY = int(os.getenv("SELFHELP_WEEKDAY", "6"))  # 20〜30代向けの自己啓発
+SELFHELP_WEEKDAY = int(os.getenv("SELFHELP_WEEKDAY", "1"))  # 20〜30代向けの自己啓発（火曜）
 
 SENIOR_RULE = """
 # 今日は週1回の「50歳以上向け」の日
