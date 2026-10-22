@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube自動化 プライバシーポリシー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Zen+Kaku+Gothic+New:wght@700&display=swap">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  /* 1カラムの文書レイアウト。見出し＋条文の、規約らしい落ち着いた組み */
+  :root {
+    --bg: #f6f7f9;
+    --paper: #ffffff;
+    --fg: #1d232b;
+    --muted: #5b6573;
+    --line: #dde2e8;
+    --accent: #2f5d8a;
+    --font-display: "Zen Kaku Gothic New", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    --font-body: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12161b; --paper: #1a2027; --fg: #e6eaef; --muted: #9aa5b2; --line: #2c343e; --accent: #8db8e0;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161b; --paper: #1a2027; --fg: #e6eaef; --muted: #9aa5b2; --line: #2c343e; --accent: #8db8e0;
+    color-scheme: dark;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.85;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 40px 56px;
+  }
+  .doc {
+    max-width: 44rem;
+    margin: 0 auto;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: clamp(24px, 5vw, 48px);
+    display: grid;
+    gap: 28px;
+  }
+  header { display: grid; gap: 8px; border-bottom: 1px solid var(--line); padding-bottom: 20px; }
+  .app { font-size: 13px; letter-spacing: 0.08em; color: var(--accent); font-weight: 700; }
+  h1 { font-family: var(--font-display); font-size: clamp(24px, 5vw, 30px); line-height: 1.35; margin: 0; text-wrap: balance; }
+  .date { color: var(--muted); font-size: 14px; margin: 0; }
+  section { display: grid; gap: 8px; }
+  h2 { font-family: var(--font-display); font-size: 18px; margin: 0; text-wrap: balance; }
+  p, ul { margin: 0; }
+  ul { padding-left: 1.3em; display: grid; gap: 4px; }
+  .intro { color: var(--fg); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; word-break: break-all; }
+  a { color: var(--accent); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  footer { border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 14px; }
+</style>
+
+</head>
+<body>
+<main class="doc">
+  <header>
+    <div class="app">YouTube自動化</div>
+    <h1>プライバシーポリシー</h1>
+    <p class="date">制定日：2026年10月21日</p>
+  </header>
+
+  <p class="intro">「YouTube自動化」（以下「本アプリ」）は、運営者個人が自分の YouTube チャンネルに動画を投稿するために作成した、個人用のツールです。本アプリが扱う情報とその取り扱いについて、次のとおり定めます。</p>
+
+  <section>
+    <h2>1. 本アプリの目的</h2>
+    <p>本アプリは、運営者が制作した動画を、運営者本人の YouTube チャンネルに「非公開」の状態でアップロードするためだけに使用します。一般の利用者に向けたサービスではなく、運営者以外のアカウントで利用することはありません。</p>
+  </section>
+
+  <section>
+    <h2>2. 取得する情報と権限</h2>
+    <p>本アプリは、Google の OAuth 認証を通じて、次の権限のみを利用します。</p>
+    <ul>
+      <li>YouTube Data API の動画アップロード権限（<code>https://www.googleapis.com/auth/youtube.upload</code>）</li>
+    </ul>
+    <p>動画のアップロードと、アップロードした動画のタイトル・説明文・サムネイルの設定以外の操作は行いません。視聴履歴、登録チャンネル、コメント、連絡先など、その他の個人情報は取得しません。</p>
+  </section>
+
+  <section>
+    <h2>3. 情報の保管</h2>
+    <p>認証に必要なトークンは、運営者が管理する環境（暗号化されたシークレット保管領域）にのみ保管し、動画のアップロード処理のときだけ使用します。</p>
+  </section>
+
+  <section>
+    <h2>4. 第三者への提供</h2>
+    <p>取得した情報を第三者に販売・提供・共有することはありません。また、広告やその他の目的に利用することもありません。</p>
+  </section>
+
+  <section>
+    <h2>5. Google API の利用について</h2>
+    <p>本アプリによる Google API から受け取った情報の利用と移転は、<a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>（限定的使用の要件を含む）に従います。</p>
+  </section>
+
+  <section>
+    <h2>6. アクセス権の取り消し</h2>
+    <p>本アプリへのアクセス許可は、Google アカウントの<a href="https://myaccount.google.com/connections" target="_blank" rel="noopener">サードパーティ製のアプリとサービス</a>の画面から、いつでも取り消すことができます。取り消した場合、本アプリはそれ以降 YouTube にアクセスできなくなります。</p>
+  </section>
+
+  <section>
+    <h2>7. お問い合わせ</h2>
+    <p>本ポリシーに関するお問い合わせは、Google の認証画面（OAuth 同意画面）に表示されている連絡先メールアドレスまでご連絡ください。</p>
+  </section>
+
+  <section>
+    <h2>8. 改定</h2>
+    <p>本ポリシーの内容は、必要に応じて改定することがあります。改定した場合は、このページの制定日の下に改定日を記載します。</p>
+  </section>
+
+  <footer>YouTube自動化 運営者</footer>
+</main>
+
+</body>
+</html>
