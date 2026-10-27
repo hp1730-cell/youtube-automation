@@ -20,7 +20,7 @@ CHANNEL_THEME = os.getenv("CHANNEL_THEME") or "幅広いジャンルの雑学・
 JST = timezone(timedelta(hours=9))
 # 週1回の特別枠（企画3をその枠の企画にする）。曜日は 0=月曜 … 5=土曜, 6=日曜。-1 にすると無効
 SENIOR_WEEKDAY = int(os.getenv("SENIOR_WEEKDAY", "5"))      # 50歳以上向け
-SELFHELP_WEEKDAY = int(os.getenv("SELFHELP_WEEKDAY", "1"))  # 自己啓発（火曜）。若い世代の入口にもする
+SELFHELP_WEEKDAY = int(os.getenv("SELFHELP_WEEKDAY", "1"))  # 心と体を整える自己啓発（火曜）。若い世代の入口にもする
 
 SENIOR_RULE = """
 # 今日は週1回の「50歳以上向け」の日
@@ -33,23 +33,47 @@ SENIOR_RULE = """
 """
 
 SELFHELP_RULE = """
-# 今日は週1回の「自己啓発」の日
-- 3つ目の企画（plans の3番目）は、自己啓発の企画にする。トレンドにこだわらなくてよい。
+# 今日は週1回の「心と体を整える」日
+- 3つ目の企画（plans の3番目）は、心と体の調子を整えることをテーマにした自己啓発の企画にする。トレンドにこだわらなくてよい。
 - 年齢を限定せず、幅広い世代が見られる内容にする。そのうえで、今の視聴者（50代以上が中心）だけでなく、
   20〜30代も「自分ごと」として見たくなる切り口を意識する。
-- テーマの例：仕事の進め方、習慣づくり、時間の使い方、お金の基礎知識、人間関係、学び方、キャリアや生き方の考え方、
-  歴史上の人物や実在の経営者・アスリートの具体的なエピソードから学ぶこと
-- 中身のある企画にするため、必ず具体的な根拠を軸にする（心理学などの研究結果、統計データ、実在の人物の実話）。
-  「前向きに生きよう」「感謝が大切」のような一般論だけの企画にはしない。
-- 根性論、断定的な「成功の法則」、怪しい副業・投資・情報商材につながる内容、医療的な助言（メンタルの不調の治し方など）は避ける。
-- タイトルは、世代を問わず思わずクリックしたくなる言葉にする（例：「一流の人が毎朝やめている3つの習慣」）。
+- テーマの例：睡眠の質、ストレスとの付き合い方、自律神経、呼吸法、姿勢や肩こり、歩くなどの軽い運動の効果、
+  食事と集中力、脳の疲れと休み方、スマホ疲れ、朝や夜の過ごし方、感情の整え方、マインドフルネス、孤独との向き合い方
+- 必ず具体的な根拠を軸にする（研究結果、公的機関の情報、統計データ）。「前向きに生きよう」のような一般論だけの企画にはしない。
+- 医学的に根拠のある内容だけにし、効果を断定しない（「〜が期待できる」「〜という研究がある」と表現する）。
+  病気の診断や治療法、薬やサプリメントのすすめ、心の不調の治し方のような医療的な助言はしない。
+  動画の最後で「不調が続くときは医師や専門家に相談を」と一言添える前提の企画にする。
+- 根性論、怪しい健康法、特定の商品・サービスの宣伝につながる内容は避ける。
+- タイトルは、世代を問わず思わずクリックしたくなる言葉にする（例：「寝る前の5分で睡眠の質が変わる理由」）。
 - 1つ目と2つ目は、いつもどおりトレンドをもとにした企画にする。
 """
 
 WEEKLY_SLOTS = [  # (曜日, Discord に出す印, AI への指示)
     (SENIOR_WEEKDAY, "🧓 50歳以上向けの週1企画", SENIOR_RULE),
-    (SELFHELP_WEEKDAY, "🌱 自己啓発の週1企画", SELFHELP_RULE),
+    (SELFHELP_WEEKDAY, "🌱 心と体を整える週1企画", SELFHELP_RULE),
 ]
+
+
+# ---------- 扱わないジャンル（スポーツ。特にバスケットボール） ----------
+# トレンドと企画案の両方から取り除く。環境変数 EXCLUDE_KEYWORDS（カンマ区切り）で言葉を追加できる
+EXCLUDE_KEYWORDS = [
+    "バスケ", "バスケットボール", "NBA", "WNBA", "Bリーグ", "B.LEAGUE", "ダンク", "スリーポイント", "レイカーズ",
+    "ウォリアーズ", "八村", "河村勇輝", "渡邊雄太", "富永啓生", "basketball",
+    "スポーツ", "試合", "選手", "サッカー", "Jリーグ", "W杯", "ワールドカップ", "プレミアリーグ", "メッシ", "ロナウド",
+    "野球", "MLB", "NPB", "プロ野球", "大谷翔平", "ドジャース", "甲子園", "ホームラン", "侍ジャパン",
+    "テニス", "ゴルフ", "ラグビー", "バレーボール", "卓球", "陸上競技", "マラソン", "駅伝", "五輪", "オリンピック",
+    "パラリンピック", "大相撲", "横綱", "ボクシング", "格闘技", "UFC", "RIZIN", "F1", "競馬", "競輪", "フィギュアスケート",
+    "football", "soccer", "baseball", "tennis", "golf",
+] + [k.strip() for k in os.getenv("EXCLUDE_KEYWORDS", "").split(",") if k.strip()]
+
+
+def is_excluded(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k.lower() in t for k in EXCLUDE_KEYWORDS)
+
+
+def plan_text_all(p: dict) -> str:
+    return " ".join([str(p.get(k, "")) for k in ("title", "hook", "summary", "why_now")] + [str(x) for x in p.get("outline", [])])
 
 
 def today_slot():
@@ -130,6 +154,7 @@ def build_prompt(trends: list[str], popular: list[str]) -> str:
 - 動画は約8分、AI生成のイラストとナレーションで構成する。実写映像・有名人の顔・他社の映像は使えない前提で成立する企画にする。
 - 速報性に頼りすぎず、数週間は見られる「解説・雑学・まとめ」の切り口にする。
 - 事実確認が難しいゴシップ、事件の被害者、政治的に偏った主張は避ける。
+- スポーツ（特にバスケットボール）に関する企画は出さない。試合・選手・チーム・リーグ・大会の話題も含めて、すべて対象外とする。
 - 3つは互いにジャンルや切り口を変える。
 {slot_rule()}
 # 出力
@@ -171,6 +196,24 @@ def generate_plans(prompt: str) -> list[dict]:
     return plans[:3]
 
 
+def generate_valid_plans(prompt: str) -> list[dict]:
+    """スポーツなど扱わないジャンルの企画が混ざっていたら、作り直す（最大3回）。"""
+    best = []
+    for attempt in range(3):
+        plans = generate_plans(prompt)
+        bad = [p for p in plans if is_excluded(plan_text_all(p))]
+        if not bad and len(plans) >= 3:
+            return plans
+        log.warning(f"扱わないジャンルの企画が {len(bad)} 件あったため作り直します（{attempt + 1}回目）: "
+                    + " / ".join(p.get("title", "") for p in bad))
+        good = [p for p in plans if not is_excluded(plan_text_all(p))]
+        if len(good) > len(best):
+            best = good
+        prompt += ("\n\n# 注意\n前回はスポーツに関する企画が含まれていました。スポーツ（特にバスケットボール）の企画は"
+                   "1つも入れずに、3つすべて別のジャンルで作り直してください。")
+    return best
+
+
 def format_plan(no: int, p: dict) -> str:
     outline = "\n".join(f"　{i + 1}. {o}" for i, o in enumerate(p.get("outline", [])))
     text = (
@@ -184,17 +227,19 @@ def format_plan(no: int, p: dict) -> str:
 
 
 def main():
-    trends = fetch_google_trends()
-    popular = fetch_youtube_popular()
+    trends = [t for t in fetch_google_trends() if not is_excluded(t)]      # スポーツの話題は最初から渡さない
+    popular = [p for p in fetch_youtube_popular() if not is_excluded(p)]
     try:
-        plans = generate_plans(build_prompt(trends, popular))
+        plans = generate_valid_plans(build_prompt(trends, popular))
+        if not plans:
+            raise RuntimeError("条件に合う企画を作れませんでした。")
     except Exception as e:
         log.error(f"企画生成に失敗しました: {e}")
         post_message(f"⚠️ 今朝の企画案の生成に失敗しました。\n```{str(e)[:1500]}```")
         sys.exit(1)
 
     today = datetime.now(JST).strftime("%m/%d")
-    slot = today_slot()
+    slot = today_slot() if len(plans) >= 3 else None
     post_message(f"📅 **{today} の企画案です**\n作りたい企画の番号（1〜3）をこのチャンネルに送信してください。"
                  f"12時台までに返信すると、動画を作成して非公開でアップロードします。"
                  + (f"\n今日は「{slot[0]}」の日です（企画3）。" if slot else ""))
