@@ -1,7 +1,7 @@
 name: YouTube Auto-Production Pipeline
 
 # ─────────────────────────────────────────────────────────────
-# ・企画案の送信 : 毎朝 JST 8:07 ごろ（cron は遅れることがあるため "分" を 0 からずらしています）
+# ・企画案の送信 : 毎朝 JST 8:07 ごろ（予備: 8:47 / 9:37 / 10:27。送信済みならスキップ）
 # ・返信チェック : JST 8:23〜12:23 ごろ 毎時
 # ・動画生成     : 返信チェックが workflow_dispatch で起動（手動実行も可）
 # ※ ジョブの振り分けは「時刻」ではなく「どの cron で起動されたか」で判定するため、
@@ -10,8 +10,13 @@ name: YouTube Auto-Production Pipeline
 # ─────────────────────────────────────────────────────────────
 on:
   schedule:
+    # GitHub の定期実行は混雑時に遅れたり飛ばされたりするため、予備のタイミングも用意している
     - cron: '7 23 * * *'            # 企画案送信 (UTC 23:07 = JST 8:07)
+    - cron: '47 23 * * *'           # 企画案送信の予備 (JST 8:47)  ※その日の企画案が送信済みなら何もしない
+    - cron: '37 0 * * *'            # 企画案送信の予備 (JST 9:37)
+    - cron: '27 1 * * *'            # 企画案送信の予備 (JST 10:27)
     - cron: '23 23,0,1,2,3 * * *'   # 返信チェック (JST 8:23, 9:23, 10:23, 11:23, 12:23)
+    - cron: '53 0,1,2,3 * * *'      # 返信チェックの予備 (JST 9:53, 10:53, 11:53, 12:53)  ※処理済みの返信は✅で判定するので二重に作らない
   workflow_dispatch:
     inputs:
       action_mode:
@@ -43,9 +48,12 @@ permissions:
 jobs:
   # --- ジョブ1：トレンド分析 → Discord に企画案を送信 ---
   trend_analysis:
-    if: github.event.schedule == '7 23 * * *' || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'analyze')
+    if: contains(fromJSON('["7 23 * * *", "47 23 * * *", "37 0 * * *", "27 1 * * *"]'), github.event.schedule) || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'analyze')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    concurrency:            # 予備のタイマーと重なっても同時に動かさない（順番に実行し、送信済みならスキップ）
+      group: trend-analysis
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -64,9 +72,12 @@ jobs:
 
   # --- ジョブ2：Discord の返信チェック → 動画生成を起動 ---
   discord_check:
-    if: github.event.schedule == '23 23,0,1,2,3 * * *' || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'check_replies')
+    if: contains(fromJSON('["23 23,0,1,2,3 * * *", "53 0,1,2,3 * * *"]'), github.event.schedule) || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'check_replies')
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:            # 予備のタイマーと重なっても同時に動かさない（同じ返信で二重に動画を作らないため）
+      group: discord-check
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
