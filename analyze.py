@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from json_repair import repair_json
 
-from discord_utils import post_message
+from discord_utils import post_message, get_messages
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("analyze")
@@ -226,7 +226,21 @@ def format_plan(no: int, p: dict) -> str:
     return text[:1900]  # 返信チェック側で1メッセージ＝1企画として読むため、分割させない
 
 
+def already_sent_today() -> bool:
+    """今日の企画案がすでに Discord に送られているか（予備のタイマーで二重に送らないため）。"""
+    marker = f"{datetime.now(JST).strftime('%m/%d')} の企画案です"
+    try:
+        return any(m.get("author", {}).get("bot") and marker in m.get("content", "") for m in get_messages(limit=50))
+    except Exception as e:
+        log.warning(f"送信済みかどうかを確認できませんでした（このまま送信します）: {e}")
+        return False
+
+
 def main():
+    # 定期実行（予備のタイマーを含む）のときは、今日の分が送信済みなら何もしない。手動実行は常に送る
+    if os.getenv("GITHUB_EVENT_NAME") == "schedule" and already_sent_today():
+        log.info("今日の企画案は送信済みのため、何もしません。")
+        return
     trends = [t for t in fetch_google_trends() if not is_excluded(t)]      # スポーツの話題は最初から渡さない
     popular = [p for p in fetch_youtube_popular() if not is_excluded(p)]
     try:
