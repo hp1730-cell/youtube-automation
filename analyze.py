@@ -236,10 +236,43 @@ def already_sent_today() -> bool:
         return False
 
 
+# 企画案を送ったあと、この時刻（JST）まで Discord の返信を待ち受ける
+REPLY_DEADLINE_HOUR = int(os.getenv("REPLY_DEADLINE_HOUR", "13"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))
+
+
+def wait_for_reply():
+    """返信（1〜3）が来るまで、締め切りまで数分おきに Discord を確認する。
+    来たらその場で動画生成を起動する（毎時の返信チェックに頼らないため）。"""
+    import time
+    import check_discord
+    now = datetime.now(JST)
+    deadline = now.replace(hour=REPLY_DEADLINE_HOUR, minute=0, second=0, microsecond=0)
+    if now >= deadline:
+        log.info("返信の受付時間を過ぎているため、待ち受けはしません。")
+        return
+    log.info(f"{deadline.strftime('%H:%M')} まで、{POLL_SECONDS // 60}分おきに返信を確認します。")
+    while datetime.now(JST) < deadline:
+        try:
+            if check_discord.check_once():
+                log.info("返信を受け付けて、動画生成を開始しました。待ち受けを終了します。")
+                return
+        except Exception as e:
+            log.warning(f"返信の確認でエラー（続けて待ちます）: {e}")
+        remaining = (deadline - datetime.now(JST)).total_seconds()
+        time.sleep(max(1, min(POLL_SECONDS, remaining)))
+    log.info("受付時間内に返信がありませんでした。")
+
+
 def main():
+    send_plans()
+    wait_for_reply()
+
+
+def send_plans():
     # 定期実行（予備のタイマーを含む）のときは、今日の分が送信済みなら何もしない。手動実行は常に送る
     if os.getenv("GITHUB_EVENT_NAME") == "schedule" and already_sent_today():
-        log.info("今日の企画案は送信済みのため、何もしません。")
+        log.info("今日の企画案は送信済みのため、送信はしません（返信の待ち受けだけ行います）。")
         return
     trends = [t for t in fetch_google_trends() if not is_excluded(t)]      # スポーツの話題は最初から渡さない
     popular = [p for p in fetch_youtube_popular() if not is_excluded(p)]

@@ -99,28 +99,33 @@ def trigger_video_workflow(title: str, plan_text: str) -> bool:
     return False
 
 
-def main():
-    log.info("--- Discord 返信チェック開始 ---")
+def check_once() -> bool:
+    """未処理の返信を1回確認する。動画生成を起動できたら True を返す。"""
     found = find_reply_and_plan(get_messages(limit=50))
     if not found:
-        log.info("新しい返信はありませんでした。")
-        return
+        return False
 
     msg, choice, plan_text = found
     if not plan_text:
         add_reaction(msg["id"], FAIL_EMOJI)
         post_message(f"⚠️ 企画{choice}の本文が見つからなかったため、動画生成を開始できませんでした。")
-        return
+        return False
 
     title = extract_title(plan_text)
     # 先にリアクションを付けてから起動（次回のチェックで二重起動しないように）
     add_reaction(msg["id"], DONE_EMOJI)
     if trigger_video_workflow(title, plan_text):
         post_message(f"🎬 企画{choice}「{title}」の動画生成を開始しました。完了まで1〜2時間ほどかかります。")
-    else:
-        add_reaction(msg["id"], FAIL_EMOJI)
-        post_message(f"⚠️ 企画{choice}の動画生成ワークフローを起動できませんでした。Actions のログを確認してください。")
-        sys.exit(1)
+        return True
+    add_reaction(msg["id"], FAIL_EMOJI)
+    post_message(f"⚠️ 企画{choice}の動画生成ワークフローを起動できませんでした。Actions のログを確認してください。")
+    return False
+
+
+def main():
+    log.info("--- Discord 返信チェック開始 ---")
+    if not check_once():
+        log.info("新しい返信はありませんでした。")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ name: YouTube Auto-Production Pipeline
 
 # ─────────────────────────────────────────────────────────────
 # ・企画案の送信 : 毎朝 JST 8:07 ごろ（予備: 8:47 / 9:37 / 10:27。送信済みならスキップ）
-# ・返信チェック : JST 8:23〜12:23 ごろ 毎時
+# ・返信チェック : 企画案の送信後、同じ実行が13時まで5分おきに待ち受ける（毎時のチェックは予備）
 # ・動画生成     : 返信チェックが workflow_dispatch で起動（手動実行も可）
 # ※ ジョブの振り分けは「時刻」ではなく「どの cron で起動されたか」で判定するため、
 #   GitHub 側の実行遅延があってもスキップされません。
@@ -50,9 +50,9 @@ jobs:
   trend_analysis:
     if: contains(fromJSON('["7 23 * * *", "47 23 * * *", "37 0 * * *", "27 1 * * *"]'), github.event.schedule) || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'analyze')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    concurrency:            # 予備のタイマーと重なっても同時に動かさない（順番に実行し、送信済みならスキップ）
-      group: trend-analysis
+    timeout-minutes: 330    # 企画案を送ったあと、13時まで返信を待ち受ける（公開リポジトリなので待ち時間も無料）
+    concurrency:            # 返信チェックと同時に動かさない（同じ返信で二重に動画を作らないため）
+      group: discord-watch
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +68,9 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           CHANNEL_THEME: ${{ vars.CHANNEL_THEME }}             # 任意（例: 雑学・歴史の解説）
+          DISCORD_ALLOWED_USER_ID: ${{ vars.DISCORD_ALLOWED_USER_ID }}
+          GH_PAT: ${{ secrets.GH_PAT }}                         # 返信を受けたら動画生成を起動するため
+          WORKFLOW_FILE: auto_pipeline.yml
         run: python analyze.py
 
   # --- ジョブ2：Discord の返信チェック → 動画生成を起動 ---
@@ -75,8 +78,8 @@ jobs:
     if: contains(fromJSON('["23 23,0,1,2,3 * * *", "53 0,1,2,3 * * *"]'), github.event.schedule) || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'check_replies')
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    concurrency:            # 予備のタイマーと重なっても同時に動かさない（同じ返信で二重に動画を作らないため）
-      group: discord-check
+    concurrency:            # 企画案の待ち受けと同時に動かさない（同じ返信で二重に動画を作らないため）
+      group: discord-watch
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
