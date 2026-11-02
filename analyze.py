@@ -237,8 +237,9 @@ def already_sent_today() -> bool:
 
 
 def main():
-    # 定期実行（予備のタイマーを含む）のときは、今日の分が送信済みなら何もしない。手動実行は常に送る
-    if os.getenv("GITHUB_EVENT_NAME") == "schedule" and already_sent_today():
+    # 定期実行・外部タイマー（only_if_needed）のときは、今日の分が送信済みなら何もしない。手動実行は常に送る
+    auto = os.getenv("GITHUB_EVENT_NAME") == "schedule" or os.getenv("ONLY_IF_NEEDED", "").lower() == "true"
+    if auto and already_sent_today():
         log.info("今日の企画案は送信済みのため、何もしません。")
         return
     trends = [t for t in fetch_google_trends() if not is_excluded(t)]      # スポーツの話題は最初から渡さない

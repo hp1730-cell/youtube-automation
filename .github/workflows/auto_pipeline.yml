@@ -41,6 +41,11 @@ on:
         required: false
         default: false
         type: boolean
+      only_if_needed:
+        description: '今日の企画案が送信済みなら何もしない（外部タイマーからの起動用）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -68,6 +73,7 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           CHANNEL_THEME: ${{ vars.CHANNEL_THEME }}             # 任意（例: 雑学・歴史の解説）
+          ONLY_IF_NEEDED: ${{ inputs.only_if_needed }}
         run: python analyze.py
 
   # --- ジョブ2：Discord の返信チェック → 動画生成を起動 ---
