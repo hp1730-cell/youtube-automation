@@ -909,7 +909,7 @@ def fetch_wikimedia(keyword: str, used: set) -> tuple[bytes, str, str] | None:
         url = info.get("thumburl") or info.get("url")
         if (info.get("mime") != "image/jpeg" or NOT_PHOTO.search(title) or not FREE_LICENSE.search(lic)
                 or info.get("width", 0) < 1000 or info.get("width", 0) < info.get("height", 1) * 1.15
-                or not url or url in used):
+                or not url or title in used):
             continue
         try:
             data = requests.get(url, headers=UA, timeout=60).content
@@ -918,7 +918,7 @@ def fetch_wikimedia(keyword: str, used: set) -> tuple[bytes, str, str] | None:
             continue
         artist = _strip_html(meta.get("Artist", {}).get("value", ""))[:60] or "不明"
         name = re.sub(r"\.jpe?g$", "", title.replace("File:", ""), flags=re.I)[:50]
-        return data, url, f"{name} / {artist} / {lic}（Wikimedia Commons）"
+        return data, url, f"{name} / {artist} / {lic}（Wikimedia Commons）", title
     return None
 
 
@@ -931,9 +931,9 @@ def fetch_pixabay(keyword: str, used: set) -> tuple[bytes, str, str] | None:
             "key": PIXABAY_API_KEY, "q": keyword[:100], "image_type": "photo", "orientation": "horizontal",
             "safesearch": "true", "per_page": 15, "min_width": 1280})
         for hit in (res.json().get("hits", []) if res.ok else []):
-            url = hit.get("largeImageURL")
-            if url and url not in used:
-                return requests.get(url, timeout=60).content, url, "Pixabay"
+            url, key = hit.get("largeImageURL"), f"pixabay_photo:{hit.get('id')}"
+            if url and key not in used:
+                return requests.get(url, timeout=60).content, url, "Pixabay", key
     except Exception as e:
         log.warning(f"Pixabay エラー: {e}")
     return None
@@ -976,12 +976,12 @@ def fetch_wikimedia_video(keyword: str, used: set, need: float) -> tuple[str, fl
         url, dur = info.get("url"), float(info.get("duration") or 0)
         if (not str(info.get("mime", "")).startswith("video/") or NOT_PHOTO.search(title)
                 or not FREE_LICENSE.search(lic) or info.get("width", 0) < 1280
-                or info.get("width", 0) < info.get("height", 1) * 1.2 or dur < min(need, 4)
-                or info.get("size", 0) > CLIP_MAX_MB << 20 or not url or url in used):
+                or info.get("width", 0) < info.get("height", 1) * 1.2 or dur < min(need, 3)
+                or info.get("size", 0) > CLIP_MAX_MB << 20 or not url or title in used):
             continue
         artist = _strip_html(meta.get("Artist", {}).get("value", ""))[:60] or "不明"
         name = re.sub(r"\.(webm|ogv|ogg|mpg|mpeg)$", "", title.replace("File:", ""), flags=re.I)[:50]
-        return url, dur, f"{name} / {artist} / {lic}（Wikimedia Commons）"
+        return url, dur, f"{name} / {artist} / {lic}（Wikimedia Commons）", title
     return None
 
 
@@ -996,12 +996,14 @@ def fetch_pixabay_video(keyword: str, used: set, need: float) -> tuple[str, floa
         log.warning(f"Pixabay エラー: {e}")
         return None
     for hit in sorted(hits, key=lambda h: h.get("duration", 0) < need):  # 長さが足りるものを優先
+        key = f"pixabay_video:{hit.get('id')}"  # 同じ動画のサイズ違いも「使用済み」として扱う
+        if key in used or hit.get("duration", 0) < min(need, 3):
+            continue
         for size in ("medium", "large"):  # 1280〜1920 幅を優先（4K は重いので後回し）
             v = (hit.get("videos") or {}).get(size) or {}
             url = v.get("url")
-            if url and v.get("width", 0) >= 1280 and v.get("width", 0) > v.get("height", 1) \
-                    and hit.get("duration", 0) >= min(need, 4) and url not in used:
-                return url, float(hit["duration"]), "Pixabay"
+            if url and v.get("width", 0) >= 1280 and v.get("width", 0) > v.get("height", 1):
+                return url, float(hit["duration"]), "Pixabay", key
     return None
 
 
@@ -1020,8 +1022,9 @@ def fetch_pexels_video(keyword: str, used: set, need: float) -> tuple[str, float
         files = [f for f in v.get("video_files", []) if 1280 <= (f.get("width") or 0) <= 1920
                  and (f.get("width") or 0) > (f.get("height") or 1)]
         files.sort(key=lambda f: -(f.get("width") or 0))
-        if files and v.get("duration", 0) >= min(need, 4) and files[0]["link"] not in used:
-            return files[0]["link"], float(v["duration"]), "Pexels"
+        key = f"pexels:{v.get('id')}"
+        if files and v.get("duration", 0) >= min(need, 3) and key not in used:
+            return files[0]["link"], float(v["duration"]), "Pexels", key
     return None
 
 
@@ -1043,43 +1046,94 @@ def prepare_clip(src: Path, out: Path, start: float, dur: float) -> bool:
         return False
 
 
+def _kw_variants(keyword: str) -> list[str]:
+    """検索語の候補：長すぎると見つからないので4語までに縮め、だめなら最後の2語で探す。"""
+    words = (keyword or "").split()
+    return list(dict.fromkeys(k for k in (" ".join(words[:4]), _shorter(keyword)) if k))
+
+
+def concat_clips(parts: list[Path], out: Path, need: float) -> bool:
+    """別々の素材をつないで1シーン分にする。足りない分は最後のコマで止めて埋める（同じ映像は繰り返さない）。"""
+    lst = out.with_suffix(".txt")
+    lst.write_text("".join(f"file '{p.resolve()}'\n" for p in parts), encoding="utf-8")
+    cmd = ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
+           "-vf", f"tpad=stop_mode=clone:stop_duration={need:.2f},fps={FPS}", "-t", f"{need:.2f}", "-an",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", str(out)]
+    try:
+        subprocess.run(cmd, check=True, timeout=300)
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(out), "-frames:v", "1", "-q:v", "2",
+                        str(out.with_suffix(".jpg"))], check=True, timeout=60)
+        return True
+    except Exception as e:
+        log.warning(f"動画素材の結合に失敗: {e}")
+        out.unlink(missing_ok=True)
+        return False
+    finally:
+        lst.unlink(missing_ok=True)
+        for p in parts:
+            p.unlink(missing_ok=True)
+            p.with_suffix(".jpg").unlink(missing_ok=True)
+
+
 def get_scene_clip(t: dict, used: set) -> bool:
-    """動画素材を探してシーン用に整える。成功すれば t["video"] と t["image"]（最初のコマ）を入れて True。"""
+    """動画素材を探してシーン用に整える。素材が短ければ、別の素材をつないで埋める（同じ映像のループはしない）。
+    成功すれば t["video"] と t["image"]（最初のコマ）を入れて True。"""
     need = t["duration"] + FADE + 0.3
     out = IMG_DIR / f"scene_{t['index']:03d}.mp4"
     if out.exists() and out.with_suffix(".jpg").exists():
         t["video"], t["image"] = str(out), str(out.with_suffix(".jpg"))
         return True
-    vkw = t.get("video_keyword") or t["search_keyword"]
+    vkws = _kw_variants(t.get("video_keyword") or t["search_keyword"])
+    skws = _kw_variants(t["search_keyword"])
     tries = []
     for src in IMAGE_SOURCES:
         if src == "wikimedia_video":
-            tries.append(("Wikimedia", t["search_keyword"], lambda: fetch_wikimedia_video(t["search_keyword"], used, need)))
+            tries += [("Wikimedia", kw, fetch_wikimedia_video) for kw in skws]
         elif src == "pixabay_video":
-            tries.append(("Pixabay", vkw, lambda: fetch_pixabay_video(vkw, used, need)))
+            tries += [("Pixabay", kw, fetch_pixabay_video) for kw in vkws]
         elif src == "pexels_video":
-            tries.append(("Pexels", vkw, lambda: fetch_pexels_video(vkw, used, need)))
-    for source, kw, fetch in tries:
-        got = fetch()
-        if not got:
-            continue
-        url, length, credit = got
-        used.add(url)
-        raw = IMG_DIR / f"raw_{t['index']:03d}"
-        if not _download(url, raw):
-            continue
-        start = 1.0 if length >= need + 2 else 0.0  # 素材の最初のフェードインを飛ばす
-        ok = prepare_clip(raw, out, start, need)
-        raw.unlink(missing_ok=True)
-        if not ok:
-            continue
-        USED_SOURCES.add(source)
-        if source == "Wikimedia":
-            PHOTO_CREDITS[url] = credit
-        log.info(f"　🎬 {source} の動画: {kw}")
-        t["video"], t["image"] = str(out), str(out.with_suffix(".jpg"))
-        return True
-    return False
+            tries += [("Pexels", kw, fetch_pexels_video) for kw in vkws]
+
+    parts, covered, labels = [], 0.0, []
+    while covered < need - 0.1 and len(parts) < 3:
+        rem = need - covered
+        added = False
+        for source, kw, fetch in tries:
+            got = fetch(kw, used, rem)
+            if not got:
+                continue
+            url, length, credit, key = got
+            used.add(key)
+            raw = IMG_DIR / f"raw_{t['index']:03d}"
+            if not _download(url, raw):
+                continue
+            start = 1.0 if length >= rem + 2 else 0.0  # 素材の最初のフェードインを飛ばす
+            use = min(rem, max(length - start - 0.1, 0))
+            if use < 1.5:  # 短すぎる素材は使わない
+                raw.unlink(missing_ok=True)
+                continue
+            part = IMG_DIR / f"part_{t['index']:03d}_{len(parts)}.mp4"
+            ok = prepare_clip(raw, part, start, use)
+            raw.unlink(missing_ok=True)
+            if not ok:
+                continue
+            USED_SOURCES.add(source)
+            if source == "Wikimedia":
+                PHOTO_CREDITS[url] = credit
+            parts.append(part)
+            labels.append(f"{source}「{kw}」")
+            covered += use
+            added = True
+            break
+        if not added:
+            break
+    if not parts:
+        return False
+    if not concat_clips(parts, out, need):
+        return False
+    log.info(f"　🎬 " + " ＋ ".join(labels) + (f"（最後の {need - covered:.1f}秒は静止）" if covered < need - 0.1 else ""))
+    t["video"], t["image"] = str(out), str(out.with_suffix(".jpg"))
+    return True
 
 
 def _shorter(keyword: str) -> str:
@@ -1101,18 +1155,19 @@ def get_scene_image(prompt: str, keyword: str, path: Path, seed: int, used: set 
             elif src == "pixabay":
                 tries.append(("Pixabay", lambda kw=kw: fetch_pixabay(kw, used)))
     if "ai" in IMAGE_SOURCES:
-        tries.append(("AI", lambda: (lambda d: (d, f"ai:{seed}", "AI生成") if d else None)(fetch_pollinations(prompt, seed))))
+        tries.append(("AI", lambda: (lambda d: (d, f"ai:{seed}", "AI生成", f"ai:{seed}") if d else None)(
+            fetch_pollinations(prompt, seed))))
     for source, fetch in tries:
         got = fetch()
         if not got:
             continue
-        data, url, credit = got
+        data, url, credit, key = got
+        used.add(key)
         try:
             prepare_image(data).save(path, "JPEG", quality=92)
         except Exception as e:
             log.warning(f"{source} の画像を読み込めませんでした: {e}")
             continue
-        used.add(url)
         USED_SOURCES.add(source)
         if source == "Wikimedia":
             PHOTO_CREDITS[url] = credit
@@ -2025,6 +2080,7 @@ def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) 
     tl, pieces, t = [], [], 0.0
     gap = np.zeros(int(SR * SHORT_GAP), dtype=np.float32)
     font = load_font(SHORT_SUB_FONT_SIZE)
+    used_in_short: set[str] = set()
     for k, sc in enumerate(short.scenes):
         audio, visemes, sub_parts = synth_with_subtitles(tts, sc.narration, font, SW - 90, 3)
         voice = len(audio) / SR
@@ -2035,12 +2091,16 @@ def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) 
         pieces += [audio, gap]
         # 1シーンを SHOT_SEC ごとのカットに分け、本編の近くのシーンの絵と交互に見せてテンポを出す
         src = sc.source_scene - 1
-        cands = [i for i in (src, src + 1, src - 1, src + 2) if 0 <= i < len(long_tl)]
-        cands = list({long_tl[i]["image"]: long_tl[i] for i in cands}.values())
         n = max(1, int(np.ceil(dur / SHOT_SEC - 0.15)))  # 2.5秒を超えたら切り替える
-        shots = [{"offset": j * dur / n, "duration": dur / n, "image": cands[j % len(cands)]["image"],
-                  "video": cands[j % len(cands)].get("video"),
-                  "camera": ("zoom_in", "zoom_out")[(k + j) % 2]} for j in range(n)]
+        # 同じショートの中で同じ映像を2回使わない：近いシーンから、まだ使っていない素材を選ぶ
+        near = [src + d for d in (0, 1, -1, 2, -2, 3, -3, 4, -4) if 0 <= src + d < len(long_tl)]
+        near = list({long_tl[i]["image"]: long_tl[i] for i in near}.values())
+        fresh = [c for c in near if c["image"] not in used_in_short]
+        cands = fresh[:n] or near[:1]
+        n = len(cands)  # 新しい素材が足りなければ、カット数を減らす（繰り返すより長めに見せる）
+        used_in_short.update(c["image"] for c in cands)
+        shots = [{"offset": j * dur / n, "duration": dur / n, "image": cands[j]["image"],
+                  "video": cands[j].get("video"), "camera": ("zoom_in", "zoom_out")[(k + j) % 2]} for j in range(n)]
         tl.append({"index": k, "start": t, "duration": dur, "voice_duration": voice,
                    "narration": sc.narration, "expression": sc.expression, "visemes": visemes,
                    "sub_parts": sub_parts, "camera": shots[0]["camera"], "image": shots[0]["image"],
