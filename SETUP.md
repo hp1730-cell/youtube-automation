@@ -95,7 +95,7 @@ prepare_character.py   ← シートから透過PNGを作り直すスクリプ�
 1. [Google Cloud Console](https://console.cloud.google.com/) にログインし、上部のプロジェクト選択から **新しいプロジェクト** を作成
 2. 「APIとサービス」→「ライブラリ」で **YouTube Data API v3** を検索して **有効にする**
 3. 「APIとサービス」→「OAuth 同意画面」（または「Google Auth Platform」）を開き、アプリ名・メールを入れて作成（対象: **外部**）
-4. 「データアクセス」（スコープ）で `https://www.googleapis.com/auth/youtube.upload` を追加
+4. 「データアクセス」（スコープ）で `https://www.googleapis.com/auth/youtube.upload` と `https://www.googleapis.com/auth/youtube`（再生リスト用）を追加
 5. 「対象」（公開ステータス）で **本番環境に公開** を押す
    ※「テスト」のままだと**リフレッシュトークンが7日で失効**し、アップロードが止まります。
    審査は不要です（自分で使うだけなら「未確認のアプリ」の警告を進めれば使えます）。
@@ -107,7 +107,7 @@ prepare_character.py   ← シートから透過PNGを作り直すスクリプ�
 ### B. リフレッシュトークンの取得（OAuth 2.0 Playground）
 1. [OAuth 2.0 Playground](https://developers.google.com/oauthplayground) を開く
 2. 右上の歯車 ⚙ → **Use your own OAuth credentials** にチェックし、A-6 のクライアント ID とシークレットを入力
-3. 左の「Input your own scopes」に `https://www.googleapis.com/auth/youtube.upload` を入れて **Authorize APIs**
+3. 左の「Input your own scopes」に `https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube`（半角スペース区切り）を入れて **Authorize APIs**
 4. 動画を投稿したいチャンネルの Google アカウントを選ぶ（「未確認のアプリ」と出たら「詳細」→「（安全ではないページ）に移動」）
 5. Step 2 で **Exchange authorization code for tokens** を押し、表示された **Refresh token** を控える
 6. 使い終わったら歯車の設定は戻してかまいません（トークンは有効なままです）
@@ -209,3 +209,14 @@ Artifacts の `research.md`（取材メモ）と `review.json`（採点と指摘
 - 台本の事実関係（特に数字・固有名詞・年号）
 - 画像に崩れた文字や不自然な人物が出ていないか
 - YouTube Studio の「改変または合成されたコンテンツ」が「はい」になっているか（アップロード時に自動設定しています）
+
+## 再生リストへの自動振り分け
+
+完成した本編は、AI が選んだジャンルの再生リストに自動で追加されます（なければ公開の再生リストとして自動作成）。
+
+| 変数（Variables） | 既定値 | 説明 |
+|---|---|---|
+| `PLAYLIST_GENRES` | 自衛隊・防衛,歴史の裏話,お金・暮らし,科学・テクノロジー,心と考え方,話題のニュース解説,雑学・その他 | 再生リストの名前（カンマ区切り）。最後のものが「どれにも当てはまらない」ときの行き先 |
+| `PLAYLIST_SHORTS` | false | true にするとショートも同じ再生リストに入れる |
+
+※ トークンに `https://www.googleapis.com/auth/youtube` の許可が必要です。許可がない場合も投稿はそのまま行われ、Discord に取り直しの案内が出ます。

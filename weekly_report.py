@@ -173,6 +173,12 @@ def check_keys() -> tuple[list[str], list[str]]:
                 "client_id": cid, "client_secret": secret, "refresh_token": refresh, "grant_type": "refresh_token"})
             if r.ok:
                 report("YouTube（投稿用のログイン）", True)
+                # 再生リストへの自動追加に必要な許可が付いているか
+                scopes = r.json().get("scope", "").split()
+                if "https://www.googleapis.com/auth/youtube" not in scopes:
+                    lines.append("ℹ️ 再生リストへの自動追加の許可がありません（投稿はできます）")
+                    warnings.append("再生リストに自動で追加するには、Playground でスコープ "
+                                    "`https://www.googleapis.com/auth/youtube` も付けてトークンを取り直してください。")
             else:
                 err = r.json().get("error", r.status_code)
                 hint = {"invalid_grant": "トークンの期限切れ・取り消し。Playground で取り直してください",

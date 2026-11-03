@@ -113,6 +113,12 @@ class Chapter(BaseModel):
     scenes: list[Scene]
 
 
+# 完成した動画を自動で入れる再生リスト（ジャンル）。環境変数 PLAYLIST_GENRES（カンマ区切り）で変更可
+PLAYLIST_GENRES = [g.strip() for g in (os.getenv("PLAYLIST_GENRES") or
+    "自衛隊・防衛,歴史の裏話,お金・暮らし,科学・テクノロジー,心と考え方,話題のニュース解説,雑学・その他"
+).split(",") if g.strip()] or ["雑学・その他"]
+
+
 class Script(BaseModel):
     video_title: str = Field(description="YouTube の動画タイトル（日本語、40文字以内）")
     description: str = Field(description="動画の概要欄の本文（日本語、3〜5行）")
@@ -123,6 +129,8 @@ class Script(BaseModel):
                                               "お金の話なら紙幣や財布）を画面の左〜中央に大きくはっきり描く。明るく高コントラストで、背景はシンプル。"
                                               "画面の右側3分の1は人物を置くので主題を置かない。人物・文字・ロゴは描かない。")
     chapters: list[Chapter]
+    genre: str = Field(default="", description="この動画を入れる再生リストのジャンル。次の中から最も合うものを1つだけ選ぶ: "
+                                               + " / ".join(PLAYLIST_GENRES))
 
 
 class Review(BaseModel):
@@ -585,7 +593,26 @@ def clean_script(script: Script) -> Script:
     script.chapters = [c for c in script.chapters if c.scenes]
     if not script.chapters:
         raise RuntimeError("台本にシーンがありません。")
+    script.genre = normalize_genre(script.genre, script.video_title)
     return script
+
+
+def normalize_genre(genre: str, title: str = "") -> str:
+    """AI が選んだジャンルを、再生リストの名前のどれか1つにそろえる。"""
+    g = (genre or "").strip()
+    if g in PLAYLIST_GENRES:
+        return g
+    text = g + " " + (title or "")
+    for name in PLAYLIST_GENRES:  # 表記ゆれ（「自衛隊」だけ、など）は部分一致で拾う
+        if g and any(part and part in g for part in re.split(r"[・/／、]", name)):
+            return name
+    hints = {"自衛隊・防衛": ("自衛隊", "防衛", "護衛艦", "艦", "戦闘機", "軍"), "お金・暮らし": ("年金", "お金", "税", "円", "節約"),
+             "心と考え方": ("習慣", "考え方", "思考", "心"), "歴史の裏話": ("歴史", "昭和", "戦国", "江戸", "明治"),
+             "科学・テクノロジー": ("宇宙", "科学", "技術", "AI", "スマホ", "ロボット")}
+    for name, words in hints.items():
+        if name in PLAYLIST_GENRES and any(w in text for w in words):
+            return name
+    return PLAYLIST_GENRES[-1]
 
 
 def notify_discord(text: str) -> None:
@@ -1610,6 +1637,7 @@ def build_metadata(script: Script, timeline: list[dict], tts: TTS) -> dict:
         "title": script.video_title.strip()[:100],
         "description": description[:4900],
         "tags": script.tags,
+        "playlist": normalize_genre(script.genre, script.video_title),
         "duration_sec": round(timeline[-1]["start"] + timeline[-1]["duration"], 1),
     }
 
