@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import requests
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1625,10 +1625,14 @@ SHORTS_COUNT = int(os.getenv("SHORTS_COUNT", "2"))       # 0 にするとショ�
 SHORT_MAX_SEC = float(os.getenv("SHORT_MAX_SEC", "35"))  # ショートの最大の長さ（秒）。短いほど最後まで見られやすい
 SHORT_SPEED = float(os.getenv("SHORT_SPEED", "1.15"))    # ショートの読み上げ速度（本編よりテンポよく）
 HOOK_POP_SEC = 0.35                                       # 冒頭で見出しが「ポン」と出る時間
+SHOT_SEC = float(os.getenv("SHORT_SHOT_SEC", "2.2"))      # この秒数ごとに絵を切り替える（短いほどテンポが速い）
+SHORT_SFX = os.getenv("SHORT_SFX", "true").lower() == "true"  # 切り替え・テロップに効果音を付けるか
+IMPACT_HOLD = 2.2                                         # 「ドン！」テロップを出しておく秒数
 SW, SH = 1080, 1920                                       # 縦長
 SHORT_GAP = 0.15                                          # ショートは間を詰めてテンポよく
 PANEL_Y, PANEL_W, PANEL_H = 300, 1080, 810                # 中央の絵の位置と大きさ（4:3）
 SHORT_SUB_Y = 1130                                        # 字幕の上端
+IMPACT_Y = PANEL_Y + int(PANEL_H * 0.66)                  # 「ドン！」テロップの中心の高さ（絵の下寄り）
 SHORT_CHAR_H = int(os.getenv("SHORT_CHAR_HEIGHT", "560"))
 
 
@@ -1636,6 +1640,8 @@ class ShortScene(BaseModel):
     narration: str = Field(description="日本語のナレーション。話し言葉で1〜2文、20〜60文字。")
     source_scene: int = Field(description="このシーンの絵として使う本編シーンの番号（台本一覧の [番号]）")
     expression: str = Field(description="解説キャラの表情。normal, smile, surprised, thinking のいずれか。")
+    impact: str = Field(default="", description="このシーンで画面中央にドンと大きく出す2〜8文字（数字＋単位か、強い一言）。"
+                                                "出さないシーンは空文字")
 
 
 class Short(BaseModel):
@@ -1682,6 +1688,8 @@ def plan_shorts(script: Script) -> list[Short]:
 - 数字は算用数字で書く（例: 1.5倍、65本、2024年）。
 - source_scene には、そのシーンの内容に最も合う本編シーンの番号を入れる。同じ番号を3回以上続けない。
 - expression は、意外な事実→surprised、問いかけ→thinking、締め→smile、それ以外→normal。1シーン目は surprised。
+- impact は、そのシーンで画面にドンと大きく出す2〜8文字。数字が出るシーンは数字＋単位（例: 100隻、3兆円、2倍）、
+  ないシーンは強い一言（例: 実は逆、まさかの理由）。1シーン目は必ず入れる。全体の半分くらいのシーンに入れ、残りは空文字。
 - hook_text は、画面上部に大きく出す見出し。タイトルより短く、答えは書かずに「なぜ？」「何？」と思わせる。
 - title も答えを書かずに、続きが気になる言い方にする。"""
     plan = llm_json(prompt, ShortsPlan, "ショートの構成", temperature=0.7)
@@ -1695,6 +1703,7 @@ def plan_shorts(script: Script) -> list[Short]:
             sc.source_scene = min(max(sc.source_scene, 1), no)
             if sc.expression not in EXPRESSIONS:
                 sc.expression = "normal"
+            sc.impact = re.sub(r"[\"“”「」『』（）()【】\[\]*#＊＃~〜\s]", "", sc.impact or "")[:10]
             scenes.append(sc)
         if scenes:
             scenes[0].expression = "surprised"  # 1シーン目は表情でも引きつける
@@ -1715,14 +1724,69 @@ def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) 
             log.warning(f"ショート{idx}: {SHORT_MAX_SEC:.0f}秒を超えるため、残りのシーンを省きます。")
             break
         pieces += [audio, gap]
+        # 1シーンを SHOT_SEC ごとのカットに分け、本編の近くのシーンの絵と交互に見せてテンポを出す
+        src = sc.source_scene - 1
+        cands = [i for i in (src, src + 1, src - 1, src + 2) if 0 <= i < len(long_tl)]
+        cands = list(dict.fromkeys(long_tl[i]["image"] for i in cands))
+        n = max(1, int(np.ceil(dur / SHOT_SEC - 0.15)))  # 2.5秒を超えたら切り替える
+        shots = [{"offset": j * dur / n, "duration": dur / n, "image": cands[j % len(cands)],
+                  "camera": ("zoom_in", "zoom_out")[(k + j) % 2]} for j in range(n)]
         tl.append({"index": k, "start": t, "duration": dur, "voice_duration": voice,
                    "narration": sc.narration, "expression": sc.expression, "visemes": visemes,
-                   "sub_parts": sub_parts, "camera": ("zoom_in", "zoom_out")[k % 2],
-                   "image": long_tl[sc.source_scene - 1]["image"]})
+                   "sub_parts": sub_parts, "camera": shots[0]["camera"], "image": shots[0]["image"],
+                   "shots": shots, "impact": display_text(sc.impact) if sc.impact else "",
+                   "impact_at": t + (0.0 if k == 0 else 0.12)})
         t += dur
+    narration = np.concatenate(pieces)
+    if SHORT_SFX:
+        narration = add_short_sfx(narration, tl)
     path = WORK / f"short_{idx}_narration.wav"
-    write_wav(path, np.concatenate(pieces))
+    write_wav(path, narration)
     return tl, path
+
+
+def _sfx_whoosh(sec: float = 0.32) -> np.ndarray:
+    """カットの切り替えの「シュッ」：中〜高音域だけ残したノイズを、ふくらませてしぼませる。"""
+    n = int(SR * sec)
+    spec = np.fft.rfft(np.random.default_rng(7).standard_normal(n))
+    freqs = np.fft.rfftfreq(n, 1 / SR)
+    spec[(freqs < 700) | (freqs > 5000)] = 0
+    x = np.fft.irfft(spec, n)
+    env = np.sin(np.linspace(0, np.pi, n)) ** 2
+    return (x / (np.abs(x).max() + 1e-9) * env).astype(np.float32)
+
+
+def _sfx_impact(sec: float = 0.55) -> np.ndarray:
+    """テロップの「ドン！」：音程が下がる低い音＋短いアタック音。"""
+    n = int(SR * sec)
+    t = np.arange(n) / SR
+    freq = 45 + 45 * np.exp(-t * 18)
+    phase = 2 * np.pi * np.cumsum(freq) / SR
+    body = (np.sin(phase) + 0.4 * np.sin(2 * phase)) * np.exp(-t * 7)
+    click = np.random.default_rng(3).standard_normal(n) * np.exp(-t * 160) * 0.5
+    x = body + click
+    return (x / (np.abs(x).max() + 1e-9)).astype(np.float32)
+
+
+def add_short_sfx(audio: np.ndarray, tl: list[dict]) -> np.ndarray:
+    """カットの切り替えに「シュッ」、テロップに「ドン」を重ねる（声より小さめ）。"""
+    out = audio.copy()
+    whoosh, impact = _sfx_whoosh(), _sfx_impact()
+
+    def put(sound: np.ndarray, at: float, vol: float):
+        i = int(at * SR)
+        if 0 <= i < len(out):
+            seg = sound[: len(out) - i] * vol
+            out[i:i + len(seg)] += seg
+
+    for sc in tl:
+        for j, shot in enumerate(sc["shots"]):
+            if sc["index"] == 0 and j == 0:
+                continue
+            put(whoosh, sc["start"] + shot["offset"] - 0.12, 0.14 if j == 0 else 0.09)
+        if sc["impact"]:
+            put(impact, sc["impact_at"], 0.32)
+    return np.clip(out, -1, 1)
 
 
 class ShortRenderer:
@@ -1741,6 +1805,43 @@ class ShortRenderer:
         self._bg: dict[str, Image.Image] = {}
         self.subs = subtitle_timing(timeline, self.sub_font, SW - 90, 3, SHORT_GAP)
         self._sub_cache: dict[int, Image.Image] = {}
+        self._impact_cache: dict[int, Image.Image] = {}
+
+    def _render_impact(self, idx: int) -> Image.Image:
+        """「ドン！」テロップ：黄色の極太文字＋黒フチ＋赤い影。"""
+        if idx not in self._impact_cache:
+            text = self.tl[idx]["impact"]
+            font = _fit_font(text, SW - 140, 220, 90)
+            sw = max(10, font.size // 9)
+            tw = int(font.getlength(text)) + sw * 2 + 30
+            th = int(font.size * 1.35) + sw * 2 + 30
+            img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            x, y = sw + 10, sw + 4
+            d.text((x + 9, y + 11), text, font=font, fill=(200, 20, 30), stroke_width=sw, stroke_fill=(200, 20, 30))
+            d.text((x, y), text, font=font, fill=(255, 232, 0), stroke_width=sw, stroke_fill=(0, 0, 0))
+            self._impact_cache = {idx: img}
+        return self._impact_cache[idx]
+
+    def _impact_layer(self, idx: int, t: float):
+        """出てから IMPACT_HOLD 秒だけ表示。最初の0.25秒で大きく→少し縮んで→ぴたっと止まる。"""
+        sc = self.tl[idx]
+        if not sc.get("impact"):
+            return None, 0.0
+        u = t - sc["impact_at"]
+        end = min(IMPACT_HOLD, sc["start"] + sc["duration"] - sc["impact_at"] - 0.05)
+        if u < 0 or u > end:
+            return None, 0.0
+        img = self._render_impact(idx)
+        if u < 0.16:
+            scale = 2.2 - 1.3 * smoothstep(u / 0.16)       # 2.2倍 → 0.9倍
+        elif u < 0.26:
+            scale = 0.9 + 0.1 * smoothstep((u - 0.16) / 0.1)  # 0.9倍 → 1.0倍
+        else:
+            scale = 1.0
+        if scale != 1.0:
+            img = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))), Image.BILINEAR)
+        return img, u
 
     def _render_hook(self, text: str) -> Image.Image:
         lines = split_thumb_text(text)
@@ -1783,11 +1884,19 @@ class ShortRenderer:
 
     def _scene_frame(self, idx: int, local_t: float) -> Image.Image:
         sc = self.tl[idx]
-        img = self._source(sc["image"])
-        frame = self._bg[sc["image"]].copy()
+        shots = sc.get("shots") or [{"offset": 0.0, "duration": sc["duration"], "image": sc["image"],
+                                     "camera": sc["camera"]}]
+        shot = shots[0]
+        for s_ in shots:
+            if s_["offset"] <= local_t:
+                shot = s_
+        st = local_t - shot["offset"]
+        img = self._source(shot["image"])
+        frame = self._bg[shot["image"]].copy()
         sw, sh = img.size
-        p = smoothstep(local_t / (sc["duration"] + FADE))
-        f = 0.96 - 0.12 * p if sc["camera"] == "zoom_in" else 0.84 + 0.12 * p
+        p = smoothstep(st / shot["duration"])
+        f = 0.96 - 0.12 * p if shot["camera"] == "zoom_in" else 0.84 + 0.12 * p
+        f *= 1 - 0.08 * max(0.0, 1 - st / 0.18)  # カットの瞬間にぐっと寄る（パンチイン）
         ch = sh * f
         cw = ch * PANEL_W / PANEL_H
         cx, cy = sw / 2, sh / 2
@@ -1821,10 +1930,15 @@ class ShortRenderer:
     def frame(self, t: float, fi: int = 0) -> Image.Image:
         idx = self._scene_at(t)
         sc = self.tl[idx]
-        frame = self._scene_frame(idx, t - sc["start"])
-        end = sc["start"] + sc["duration"]
-        if idx + 1 < len(self.tl) and t > end - FADE:
-            frame = Image.blend(frame, self._scene_frame(idx + 1, 0.0), smoothstep((t - (end - FADE)) / FADE))
+        frame = self._scene_frame(idx, t - sc["start"])  # ショートはクロスフェードせず、ぱっと切り替える
+        impact, u = self._impact_layer(idx, t)
+        if impact is not None and u < 0.28:  # テロップが出た瞬間、画面を揺らす
+            amp = 14 * (1 - u / 0.28)
+            frame = ImageChops.offset(frame, int(amp * np.sin(u * 90)), int(amp * 0.6 * np.cos(u * 70)))
+        if impact is not None:
+            frame.paste(impact, ((SW - impact.width) // 2, IMPACT_Y - impact.height // 2), impact)
+            if u < 0.1:  # 一瞬だけ白く光らせる
+                frame = Image.blend(frame, Image.new("RGB", frame.size, (255, 255, 255)), 0.45 * (1 - u / 0.1))
         if t < HOOK_POP_SEC:  # 冒頭0.35秒で見出しが大きめから「ポン」と収まる（最初のフレームから動きを出す）
             p = smoothstep(t / HOOK_POP_SEC)
             scale = 1.25 - 0.25 * p
@@ -1848,6 +1962,8 @@ class ShortRenderer:
         sub = self._subtitle_at(t)
         if sub is not None:
             frame.paste(sub, (0, SHORT_SUB_Y), sub)
+        # 一番上に進み具合のバー（短い動画だと分かると、最後まで見てもらいやすい）
+        ImageDraw.Draw(frame).rectangle((0, 0, int(SW * min(t / self.total, 1.0)), 9), fill=(255, 221, 0))
         return frame
 
 
