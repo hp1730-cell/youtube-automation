@@ -154,8 +154,11 @@ Actions タブ → 「YouTube Auto-Production Pipeline」→ **Run workflow** �
 | `SHORTS_COUNT` | 2 | 本編と一緒に作るショート動画の本数（0 で作らない） |
 | `SHORT_MAX_SEC` | 35 | ショートの最大の長さ（秒）。短いほど最後まで見られやすい |
 | `SHORT_SPEED` | 1.15 | ショートの読み上げ速度（本編は VOICEVOX_SPEED） |
+| `SHORT_SHOT_SEC` | 2.2 | ショートで絵を切り替える間隔（秒）。短いほどテンポが速い |
+| `SHORT_SFX` | true | ショートの切り替え・テロップに効果音を付けるか |
 | `GEMINI_MODELS` | `gemini-2.5-flash,gemini-2.5-flash-lite` | 使うモデル（左から順に試行）。新しいモデルが出たら先頭に追加 |
-| `IMAGE_STYLE` | アニメ調 | 全画像に共通で付ける画風の指定 |
+| `IMAGE_SOURCES` | wikimedia_video,pixabay_video,pexels_video,wikimedia,pixabay | 映像の取り寄せ先（左から順）。まず動画素材（実物の映像→動画素材）、なければ写真。`ai` を足すとAI生成も使う（初期設定では使わない） |
+| `IMAGE_STYLE` | アニメ調 | AI生成を使うときだけの画風の指定 |
 | `VOICEVOX_SPEED` | 1.05 | 話す速さ（視聴者の中心が50代以上なので少しゆっくりめ） |
 | `BGM_VOLUME` | 0.10 | BGM の音量 |
 | `BGM_CREDIT` | なし | BGM のクレジット表記（概要欄に入ります） |
@@ -210,3 +213,7 @@ Artifacts の `research.md`（取材メモ）と `review.json`（採点と指摘
 - 台本の事実関係（特に数字・固有名詞・年号）
 - 画像に崩れた文字や不自然な人物が出ていないか
 - YouTube Studio の「改変または合成されたコンテンツ」が「はい」になっているか（アップロード時に自動設定しています）
+
+## 動画素材を増やす（任意・無料）
+
+[Pexels](https://www.pexels.com/api/) に無料登録（カード不要）して API キーを取得し、Secrets に `PEXELS_API_KEY` として登録すると、動画素材の候補が増えます。未設定でも Wikimedia Commons と Pixabay の動画素材は使われます。
