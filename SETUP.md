@@ -154,6 +154,8 @@ Actions タブ → 「YouTube Auto-Production Pipeline」→ **Run workflow** �
 | `SHORTS_COUNT` | 2 | 本編と一緒に作るショート動画の本数（0 で作らない） |
 | `SHORT_MAX_SEC` | 35 | ショートの最大の長さ（秒）。短いほど最後まで見られやすい |
 | `SHORT_SPEED` | 1.15 | ショートの読み上げ速度（本編は VOICEVOX_SPEED） |
+| `SHORT_SHOT_SEC` | 2.2 | ショートで絵を切り替える間隔（秒）。短いほどテンポが速い |
+| `SHORT_SFX` | true | ショートの切り替え・テロップに効果音を付けるか |
 | `GEMINI_MODELS` | `gemini-2.5-flash,gemini-2.5-flash-lite` | 使うモデル（左から順に試行）。新しいモデルが出たら先頭に追加 |
 | `IMAGE_SOURCES` | wikimedia,pixabay | 画像の取り寄せ先（左から順）。wikimedia=実物の写真、pixabay=写真素材。`ai` を足すとAI生成も使う（初期設定では使わない） |
 | `IMAGE_STYLE` | アニメ調 | AI生成を使うときだけの画風の指定 |
