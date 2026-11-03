@@ -59,12 +59,17 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODELS = [m.strip() for m in os.getenv("GROQ_MODELS", "openai/gpt-oss-120b,llama-3.3-70b-versatile").split(",") if m.strip()]
 
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")  # 任意（動画素材をもっと増やしたいとき。無料・カード不要）
 POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN")
 POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux")
 IMAGE_INTERVAL = float(os.getenv("IMAGE_INTERVAL", "1"))   # 画像 API の呼び出し間隔（秒）
-# 画像の取り寄せ先（左から順に試す）。wikimedia = 実物の写真（艦船・機体・施設・地名に強い）、
-# pixabay = 無料の写真素材（お金・暮らし・心などの一般的な場面に強い）、ai = AI生成（初期設定では使わない）
-IMAGE_SOURCES = [x.strip() for x in (os.getenv("IMAGE_SOURCES") or "wikimedia,pixabay").split(",") if x.strip()]
+# 映像の取り寄せ先（左から順に試す）。まず動画素材、なければ写真。
+#   wikimedia_video = 実物の映像（艦船・機体など。米軍などの公開映像が多い）
+#   pixabay_video / pexels_video = 無料の動画素材（街・海・お金・暮らしなど一般的な場面）
+#   wikimedia = 実物の写真、pixabay = 写真素材、ai = AI生成（初期設定では使わない）
+IMAGE_SOURCES = [x.strip() for x in (os.getenv("IMAGE_SOURCES") or
+                 "wikimedia_video,pixabay_video,pexels_video,wikimedia,pixabay").split(",") if x.strip()]
+CLIP_MAX_MB = 120   # これより大きい動画ファイルは取り寄せない
 UA = {"User-Agent": "youtube-automation/1.0 (https://github.com/hp1730-cell/youtube-automation)"}
 IMAGE_STYLE = os.getenv(
     "IMAGE_STYLE",
@@ -110,6 +115,8 @@ class Scene(BaseModel):
     search_keyword: str = Field(description="このシーンに映す実物の写真を探す英語の検索語。写っている物そのものを"
                                             "具体的な名詞で（例: JMSDF destroyer Izumo, F-35 fighter jet, "
                                             "Kashiwazaki-Kariwa Nuclear Power Plant, Japanese yen banknotes）。")
+    video_keyword: str = Field(default="", description="動画素材を探す英語の検索語。動きのある一般的な場面を2〜4語で"
+                                                      "（例: warship sailing at sea, fighter jet takeoff, busy Tokyo street）。")
     camera: str = Field(description="zoom_in, zoom_out, pan_left, pan_right のいずれか。")
     expression: str = Field(description="このシーンでの解説キャラの表情。normal, smile, surprised, thinking のいずれか。")
 
@@ -429,6 +436,8 @@ def build_script_prompt(research: str, feedback: str = "") -> str:
   （例: JMSDF destroyer Izumo / F-35A Lightning II / Kashiwazaki-Kariwa Nuclear Power Plant / Bank of Japan building）。
   抽象的な話（心・お金の考え方など）は、その場面を表す身近な物（例: stack of Japanese yen coins, calendar on desk, sunrise over city）。
   人物の顔写真、スポーツの試合、ロゴになる語は避ける。
+- video_keyword は、動画素材サイトで見つかる「動きのある一般的な場面」を英語2〜4語で
+  （例: warship sailing at sea / fighter jet takeoff / nuclear power plant cooling tower / busy Tokyo street / coins falling）。
 - camera は単調にならないよう、zoom_in / zoom_out / pan_left / pan_right を織り交ぜる。
 {feedback}"""
 
@@ -564,6 +573,8 @@ def expand_script(script: Script, research: str) -> Script:
   （例: JMSDF destroyer Izumo / F-35A Lightning II / Kashiwazaki-Kariwa Nuclear Power Plant / Bank of Japan building）。
   抽象的な話（心・お金の考え方など）は、その場面を表す身近な物（例: stack of Japanese yen coins, calendar on desk, sunrise over city）。
   人物の顔写真、スポーツの試合、ロゴになる語は避ける。
+- video_keyword は、動画素材サイトで見つかる「動きのある一般的な場面」を英語2〜4語で
+  （例: warship sailing at sea / fighter jet takeoff / nuclear power plant cooling tower / busy Tokyo street / coins falling）。
 - title は「{ch.title}」のままにする。"""
             try:
                 new = llm_json(prompt, Chapter, f"第{i + 1}章の書き足し", temperature=0.7)
@@ -803,7 +814,8 @@ def build_timeline(script: Script, tts: TTS) -> tuple[list[dict], Path]:
                 "index": len(timeline), "chapter": ci, "chapter_title": ch.title,
                 "start": t, "duration": dur, "voice_duration": voice_dur,
                 "narration": sc.narration, "image_prompt": sc.image_prompt,
-                "search_keyword": sc.search_keyword, "camera": sc.camera,
+                "search_keyword": sc.search_keyword, "video_keyword": sc.video_keyword or sc.search_keyword,
+                "camera": sc.camera,
                 "expression": sc.expression, "visemes": visemes, "sub_parts": sub_parts,
             })
             t += dur
@@ -927,6 +939,149 @@ def fetch_pixabay(keyword: str, used: set) -> tuple[bytes, str, str] | None:
     return None
 
 
+def _download(url: str, dest: Path, headers: dict | None = None) -> bool:
+    try:
+        with requests.get(url, headers=headers or UA, timeout=120, stream=True) as r:
+            r.raise_for_status()
+            size = 0
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    size += len(chunk)
+                    if size > CLIP_MAX_MB << 20:
+                        raise RuntimeError("ファイルが大きすぎます")
+                    f.write(chunk)
+        return True
+    except Exception as e:
+        log.warning(f"動画のダウンロードに失敗: {e}")
+        dest.unlink(missing_ok=True)
+        return False
+
+
+def fetch_wikimedia_video(keyword: str, used: set, need: float) -> tuple[str, float, str] | None:
+    """Wikimedia Commons の実物の映像。（URL, 長さ, 出典）を返す。"""
+    try:
+        res = requests.get("https://commons.wikimedia.org/w/api.php", headers=UA, timeout=30, params={
+            "action": "query", "format": "json", "generator": "search", "gsrnamespace": 6, "gsrlimit": 20,
+            "gsrsearch": f"{keyword} filetype:video", "prop": "imageinfo",
+            "iiprop": "url|size|mime|extmetadata", "iiextmetadatafilter": "Artist|LicenseShortName"})
+        pages = sorted(res.json().get("query", {}).get("pages", {}).values(), key=lambda p: p.get("index", 99))
+    except Exception as e:
+        log.warning(f"Wikimedia エラー: {e}")
+        return None
+    for page in pages:
+        info = (page.get("imageinfo") or [{}])[0]
+        title = page.get("title", "")
+        meta = info.get("extmetadata", {})
+        lic = _strip_html(meta.get("LicenseShortName", {}).get("value", ""))
+        url, dur = info.get("url"), float(info.get("duration") or 0)
+        if (not str(info.get("mime", "")).startswith("video/") or NOT_PHOTO.search(title)
+                or not FREE_LICENSE.search(lic) or info.get("width", 0) < 1280
+                or info.get("width", 0) < info.get("height", 1) * 1.2 or dur < min(need, 4)
+                or info.get("size", 0) > CLIP_MAX_MB << 20 or not url or url in used):
+            continue
+        artist = _strip_html(meta.get("Artist", {}).get("value", ""))[:60] or "不明"
+        name = re.sub(r"\.(webm|ogv|ogg|mpg|mpeg)$", "", title.replace("File:", ""), flags=re.I)[:50]
+        return url, dur, f"{name} / {artist} / {lic}（Wikimedia Commons）"
+    return None
+
+
+def fetch_pixabay_video(keyword: str, used: set, need: float) -> tuple[str, float, str] | None:
+    if not PIXABAY_API_KEY:
+        return None
+    try:
+        res = requests.get("https://pixabay.com/api/videos/", timeout=30, params={
+            "key": PIXABAY_API_KEY, "q": keyword[:100], "safesearch": "true", "per_page": 15})
+        hits = res.json().get("hits", []) if res.ok else []
+    except Exception as e:
+        log.warning(f"Pixabay エラー: {e}")
+        return None
+    for hit in sorted(hits, key=lambda h: h.get("duration", 0) < need):  # 長さが足りるものを優先
+        for size in ("medium", "large"):  # 1280〜1920 幅を優先（4K は重いので後回し）
+            v = (hit.get("videos") or {}).get(size) or {}
+            url = v.get("url")
+            if url and v.get("width", 0) >= 1280 and v.get("width", 0) > v.get("height", 1) \
+                    and hit.get("duration", 0) >= min(need, 4) and url not in used:
+                return url, float(hit["duration"]), "Pixabay"
+    return None
+
+
+def fetch_pexels_video(keyword: str, used: set, need: float) -> tuple[str, float, str] | None:
+    if not PEXELS_API_KEY:
+        return None
+    try:
+        res = requests.get("https://api.pexels.com/videos/search", timeout=30,
+                           headers={"Authorization": PEXELS_API_KEY},
+                           params={"query": keyword[:100], "per_page": 15, "orientation": "landscape"})
+        videos = res.json().get("videos", []) if res.ok else []
+    except Exception as e:
+        log.warning(f"Pexels エラー: {e}")
+        return None
+    for v in sorted(videos, key=lambda v: v.get("duration", 0) < need):
+        files = [f for f in v.get("video_files", []) if 1280 <= (f.get("width") or 0) <= 1920
+                 and (f.get("width") or 0) > (f.get("height") or 1)]
+        files.sort(key=lambda f: -(f.get("width") or 0))
+        if files and v.get("duration", 0) >= min(need, 4) and files[0]["link"] not in used:
+            return files[0]["link"], float(v["duration"]), "Pexels"
+    return None
+
+
+def prepare_clip(src: Path, out: Path, start: float, dur: float) -> bool:
+    """動画素材を 1920x1080・30fps・無音に整え、シーンの長さに切り出す（短ければ繰り返す）。"""
+    cmd = ["ffmpeg", "-y", "-v", "error", "-stream_loop", "-1", "-ss", f"{start:.2f}", "-i", str(src),
+           "-t", f"{dur:.2f}", "-an",
+           "-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps={FPS},setsar=1,"
+                  "eq=saturation=1.08:contrast=1.04",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", str(out)]
+    try:
+        subprocess.run(cmd, check=True, timeout=300)
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(out), "-frames:v", "1", "-q:v", "2",
+                        str(out.with_suffix(".jpg"))], check=True, timeout=60)
+        return out.exists() and out.with_suffix(".jpg").exists()
+    except Exception as e:
+        log.warning(f"動画素材の変換に失敗: {e}")
+        out.unlink(missing_ok=True)
+        return False
+
+
+def get_scene_clip(t: dict, used: set) -> bool:
+    """動画素材を探してシーン用に整える。成功すれば t["video"] と t["image"]（最初のコマ）を入れて True。"""
+    need = t["duration"] + FADE + 0.3
+    out = IMG_DIR / f"scene_{t['index']:03d}.mp4"
+    if out.exists() and out.with_suffix(".jpg").exists():
+        t["video"], t["image"] = str(out), str(out.with_suffix(".jpg"))
+        return True
+    vkw = t.get("video_keyword") or t["search_keyword"]
+    tries = []
+    for src in IMAGE_SOURCES:
+        if src == "wikimedia_video":
+            tries.append(("Wikimedia", t["search_keyword"], lambda: fetch_wikimedia_video(t["search_keyword"], used, need)))
+        elif src == "pixabay_video":
+            tries.append(("Pixabay", vkw, lambda: fetch_pixabay_video(vkw, used, need)))
+        elif src == "pexels_video":
+            tries.append(("Pexels", vkw, lambda: fetch_pexels_video(vkw, used, need)))
+    for source, kw, fetch in tries:
+        got = fetch()
+        if not got:
+            continue
+        url, length, credit = got
+        used.add(url)
+        raw = IMG_DIR / f"raw_{t['index']:03d}"
+        if not _download(url, raw):
+            continue
+        start = 1.0 if length >= need + 2 else 0.0  # 素材の最初のフェードインを飛ばす
+        ok = prepare_clip(raw, out, start, need)
+        raw.unlink(missing_ok=True)
+        if not ok:
+            continue
+        USED_SOURCES.add(source)
+        if source == "Wikimedia":
+            PHOTO_CREDITS[url] = credit
+        log.info(f"　🎬 {source} の動画: {kw}")
+        t["video"], t["image"] = str(out), str(out.with_suffix(".jpg"))
+        return True
+    return False
+
+
 def _shorter(keyword: str) -> str:
     """見つからないときの検索語：最後の2語だけにする（例: JMSDF destroyer Izumo → destroyer Izumo）。"""
     words = keyword.split()
@@ -969,10 +1124,16 @@ def get_scene_image(prompt: str, keyword: str, path: Path, seed: int, used: set 
 
 def generate_images(timeline: list[dict], base_seed: int) -> None:
     IMG_DIR.mkdir(parents=True, exist_ok=True)
-    used: set[str] = set()   # 同じ写真を何度も使わない
+    used: set[str] = set()   # 同じ素材を何度も使わない
     prev = None
+    videos = 0
     for t in timeline:
-        log.info(f"画像 {t['index'] + 1}/{len(timeline)}")
+        log.info(f"映像 {t['index'] + 1}/{len(timeline)}")
+        if get_scene_clip(t, used):  # まず動画素材
+            prev = t["image"]
+            videos += 1
+            time.sleep(IMAGE_INTERVAL)
+            continue
         path = IMG_DIR / f"scene_{t['index']:03d}.jpg"
         got = get_scene_image(t["image_prompt"], t["search_keyword"], path, base_seed + t["index"], used)
         if got is None and prev is not None:
@@ -984,8 +1145,8 @@ def generate_images(timeline: list[dict], base_seed: int) -> None:
             got = path
         t["image"] = prev = str(got)
         time.sleep(IMAGE_INTERVAL)
-    found = sum(1 for t in timeline if Path(t["image"]).name == f"scene_{t['index']:03d}.jpg")
-    log.info(f"写真 {found}/{len(timeline)} シーン分を取得（残りは前の写真を使い回し）")
+    found = sum(1 for t in timeline if Path(t["image"]).name == f"scene_{t['index']:03d}.jpg") - videos
+    log.info(f"動画 {videos}・写真 {found}・使い回し {len(timeline) - videos - found}（全{len(timeline)}シーン）")
 
 
 # ============================== 4. 映像 ==============================
@@ -1431,6 +1592,42 @@ def voice_envelope(narration: np.ndarray, n_frames: int) -> np.ndarray:
     return env
 
 
+class ClipReader:
+    """整えた動画素材を、1コマずつ順番に読み出す（ffmpeg で展開）。"""
+
+    def __init__(self, path: str, size: tuple[int, int] = (W, H)):
+        self.path, self.size = path, size
+        self.proc, self.pos, self.last = None, -1, None
+
+    def _open(self):
+        self.proc = subprocess.Popen(["ffmpeg", "-v", "error", "-i", self.path, "-f", "rawvideo",
+                                      "-pix_fmt", "rgb24", "pipe:1"], stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL)
+        self.pos = -1
+
+    def frame(self, n: int) -> Image.Image | None:
+        if self.proc is None or n < self.pos:
+            self.close()
+            self._open()
+        nbytes = self.size[0] * self.size[1] * 3
+        while self.pos < n:
+            buf = self.proc.stdout.read(nbytes)
+            if len(buf) < nbytes:  # 最後まで来たら、最後のコマのまま止める
+                break
+            self.last, self.pos = buf, self.pos + 1
+        return Image.frombytes("RGB", self.size, self.last) if self.last else None
+
+    def close(self):
+        if self.proc:
+            try:
+                self.proc.stdout.close()
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+            self.proc = None
+
+
 class Renderer:
     def __init__(self, timeline: list[dict], narration: np.ndarray | None = None):
         global SUB_FONT, LABEL_FONT
@@ -1440,6 +1637,7 @@ class Renderer:
         self.n_frames = int(self.total * FPS) + 1
         self._img_cache: dict[int, Image.Image] = {}
         self._labels: dict[int, Image.Image] = {}
+        self._clips: dict[int, ClipReader] = {}
 
         self.char = Character(CHARACTER_HEIGHT)
         self.env = voice_envelope(narration, self.n_frames) if (self.char.enabled and narration is not None) \
@@ -1466,6 +1664,14 @@ class Renderer:
     def _scene_frame(self, idx: int, local_t: float) -> Image.Image:
         """Ken Burns: 中心基準のズーム・パンを浮動小数の切り抜き範囲で計算し、滑らかに動かす。"""
         sc = self.tl[idx]
+        if sc.get("video"):  # 動画素材はそのまま流す
+            if idx not in self._clips:
+                for k in [k for k in self._clips if k < idx - 1]:
+                    self._clips.pop(k).close()
+                self._clips[idx] = ClipReader(sc["video"])
+            fr = self._clips[idx].frame(int(max(local_t, 0) * FPS))
+            if fr is not None:
+                return fr
         img = self._image(idx)
         sw, sh = img.size
         p = smoothstep(local_t / (sc["duration"] + FADE))
@@ -1688,13 +1894,14 @@ def make_credits(tts: TTS) -> list[str]:
     credits = []
     if tts.credit:
         credits.append(f"音声: {tts.credit}")
-    if "Wikimedia" in USED_SOURCES or "Pixabay" in USED_SOURCES:
-        names = [n for n, k in (("Wikimedia Commons", "Wikimedia"), ("Pixabay", "Pixabay")) if k in USED_SOURCES]
-        credits.append("写真: " + "、".join(names))
+    names = [n for n, k in (("Wikimedia Commons", "Wikimedia"), ("Pixabay", "Pixabay"), ("Pexels", "Pexels"))
+             if k in USED_SOURCES]
+    if names:
+        credits.append("映像・写真: " + "、".join(names))
     if "AI" in USED_SOURCES:
         credits.append("イラスト: AI生成")
     if PHOTO_CREDITS:  # Wikimedia の写真は作者とライセンスの表示が必要
-        credits.append("写真の出典:\n" + "\n".join(f"・{c}" for c in list(dict.fromkeys(PHOTO_CREDITS.values()))[:30]))
+        credits.append("映像・写真の出典:\n" + "\n".join(f"・{c}" for c in list(dict.fromkeys(PHOTO_CREDITS.values()))[:30]))
     if BGM_PATH.exists():
         credits.append(f"BGM: {os.getenv('BGM_CREDIT', '（BGMのクレジットを BGM_CREDIT に設定してください）')}")
     return credits
@@ -1829,9 +2036,10 @@ def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) 
         # 1シーンを SHOT_SEC ごとのカットに分け、本編の近くのシーンの絵と交互に見せてテンポを出す
         src = sc.source_scene - 1
         cands = [i for i in (src, src + 1, src - 1, src + 2) if 0 <= i < len(long_tl)]
-        cands = list(dict.fromkeys(long_tl[i]["image"] for i in cands))
+        cands = list({long_tl[i]["image"]: long_tl[i] for i in cands}.values())
         n = max(1, int(np.ceil(dur / SHOT_SEC - 0.15)))  # 2.5秒を超えたら切り替える
-        shots = [{"offset": j * dur / n, "duration": dur / n, "image": cands[j % len(cands)],
+        shots = [{"offset": j * dur / n, "duration": dur / n, "image": cands[j % len(cands)]["image"],
+                  "video": cands[j % len(cands)].get("video"),
                   "camera": ("zoom_in", "zoom_out")[(k + j) % 2]} for j in range(n)]
         tl.append({"index": k, "start": t, "duration": dur, "voice_duration": voice,
                    "narration": sc.narration, "expression": sc.expression, "visemes": visemes,
@@ -1908,6 +2116,7 @@ class ShortRenderer:
         self.subs = subtitle_timing(timeline, self.sub_font, SW - 90, 3, SHORT_GAP)
         self._sub_cache: dict[int, Image.Image] = {}
         self._impact_cache: dict[int, Image.Image] = {}
+        self._clips: dict[tuple, ClipReader] = {}
 
     def _render_impact(self, idx: int) -> Image.Image:
         """「ドン！」テロップ：黄色の極太文字＋黒フチ＋赤い影。"""
@@ -1995,6 +2204,15 @@ class ShortRenderer:
         st = local_t - shot["offset"]
         img = self._source(shot["image"])
         frame = self._bg[shot["image"]].copy()
+        if shot.get("video"):  # 動画素材：本編用の素材から4:3を切り出して流す（背景は最初のコマのぼかし）
+            key = (idx, shot["offset"])
+            if key not in self._clips:
+                for k in [k for k in self._clips if k[0] < idx]:
+                    self._clips.pop(k).close()
+                self._clips[key] = ClipReader(shot["video"])
+            fr = self._clips[key].frame(int(st * FPS))
+            if fr is not None:
+                img = fr
         sw, sh = img.size
         p = smoothstep(st / shot["duration"])
         f = 0.96 - 0.12 * p if shot["camera"] == "zoom_in" else 0.84 + 0.12 * p

@@ -195,6 +195,16 @@ def check_keys() -> tuple[list[str], list[str]]:
     else:
         report("Pixabay", None)
 
+    # Pexels（動画素材・任意）
+    key = os.getenv("PEXELS_API_KEY")
+    if key:
+        try:
+            r = requests.get("https://api.pexels.com/videos/search", headers={"Authorization": key},
+                             params={"query": "sea", "per_page": 1}, timeout=30)
+            report("Pexels", r.ok, f"エラー {r.status_code}")
+        except Exception as e:
+            report("Pexels", False, str(e)[:80])
+
     # 有料プランの鍵が設定されていないか（Pollinations の有料トークンなど）
     if os.getenv("POLLINATIONS_TOKEN"):
         lines.append("ℹ️ Pollinations のトークンが設定されています。無料プランのものか確認してください")
