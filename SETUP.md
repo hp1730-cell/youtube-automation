@@ -155,7 +155,8 @@ Actions タブ → 「YouTube Auto-Production Pipeline」→ **Run workflow** �
 | `SHORT_MAX_SEC` | 35 | ショートの最大の長さ（秒）。短いほど最後まで見られやすい |
 | `SHORT_SPEED` | 1.15 | ショートの読み上げ速度（本編は VOICEVOX_SPEED） |
 | `GEMINI_MODELS` | `gemini-2.5-flash,gemini-2.5-flash-lite` | 使うモデル（左から順に試行）。新しいモデルが出たら先頭に追加 |
-| `IMAGE_STYLE` | アニメ調 | 全画像に共通で付ける画風の指定 |
+| `IMAGE_SOURCES` | wikimedia,pixabay | 画像の取り寄せ先（左から順）。wikimedia=実物の写真、pixabay=写真素材。`ai` を足すとAI生成も使う（初期設定では使わない） |
+| `IMAGE_STYLE` | アニメ調 | AI生成を使うときだけの画風の指定 |
 | `VOICEVOX_SPEED` | 1.05 | 話す速さ（視聴者の中心が50代以上なので少しゆっくりめ） |
 | `BGM_VOLUME` | 0.10 | BGM の音量 |
 | `BGM_CREDIT` | なし | BGM のクレジット表記（概要欄に入ります） |

@@ -61,7 +61,11 @@ GROQ_MODELS = [m.strip() for m in os.getenv("GROQ_MODELS", "openai/gpt-oss-120b,
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN")
 POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux")
-IMAGE_INTERVAL = float(os.getenv("IMAGE_INTERVAL", "3"))   # 画像生成 API の呼び出し間隔（秒）
+IMAGE_INTERVAL = float(os.getenv("IMAGE_INTERVAL", "1"))   # 画像 API の呼び出し間隔（秒）
+# 画像の取り寄せ先（左から順に試す）。wikimedia = 実物の写真（艦船・機体・施設・地名に強い）、
+# pixabay = 無料の写真素材（お金・暮らし・心などの一般的な場面に強い）、ai = AI生成（初期設定では使わない）
+IMAGE_SOURCES = [x.strip() for x in (os.getenv("IMAGE_SOURCES") or "wikimedia,pixabay").split(",") if x.strip()]
+UA = {"User-Agent": "youtube-automation/1.0 (https://github.com/hp1730-cell/youtube-automation)"}
 IMAGE_STYLE = os.getenv(
     "IMAGE_STYLE",
     "anime style illustration, detailed background art, soft cinematic lighting, "
@@ -103,7 +107,9 @@ SCRIPT_ROUNDS = int(os.getenv("SCRIPT_ROUNDS", "3"))
 class Scene(BaseModel):
     narration: str = Field(description="日本語のナレーション。話し言葉で1〜3文、40〜90文字。")
     image_prompt: str = Field(description="このシーンの挿絵を描くための英語プロンプト。被写体・場所・構図・光を具体的に。文字は含めない。")
-    search_keyword: str = Field(description="予備の画像検索用の英単語1〜2語。")
+    search_keyword: str = Field(description="このシーンに映す実物の写真を探す英語の検索語。写っている物そのものを"
+                                            "具体的な名詞で（例: JMSDF destroyer Izumo, F-35 fighter jet, "
+                                            "Kashiwazaki-Kariwa Nuclear Power Plant, Japanese yen banknotes）。")
     camera: str = Field(description="zoom_in, zoom_out, pan_left, pan_right のいずれか。")
     expression: str = Field(description="このシーンでの解説キャラの表情。normal, smile, surprised, thinking のいずれか。")
 
@@ -419,6 +425,10 @@ def build_script_prompt(research: str, feedback: str = "") -> str:
   （例: 年号の話ならその時代の街並み、数字の比較なら比較対象そのもの）
 - 文字・ロゴ・実在の有名人・既存アニメのキャラクターは含めない。
 - 同じ人物が繰り返し登場する場合は、毎回同じ外見の説明（年齢・髪型・服装）を入れる。
+- search_keyword は、実物の写真を探すための英語の検索語。シーンの主役になる「物・場所・機体・建物」の正式名称を具体的に
+  （例: JMSDF destroyer Izumo / F-35A Lightning II / Kashiwazaki-Kariwa Nuclear Power Plant / Bank of Japan building）。
+  抽象的な話（心・お金の考え方など）は、その場面を表す身近な物（例: stack of Japanese yen coins, calendar on desk, sunrise over city）。
+  人物の顔写真、スポーツの試合、ロゴになる語は避ける。
 - camera は単調にならないよう、zoom_in / zoom_out / pan_left / pan_right を織り交ぜる。
 {feedback}"""
 
@@ -550,6 +560,10 @@ def expand_script(script: Script, research: str) -> Script:
 - expression は normal / smile / surprised / thinking のいずれか（6割以上 normal）。
 - camera は zoom_in / zoom_out / pan_left / pan_right を織り交ぜる。
 - image_prompt は英語で、そのシーンの内容が一目で分かる具体的な場面。文字・ロゴ・実在の有名人は含めない。
+- search_keyword は、実物の写真を探すための英語の検索語。シーンの主役になる「物・場所・機体・建物」の正式名称を具体的に
+  （例: JMSDF destroyer Izumo / F-35A Lightning II / Kashiwazaki-Kariwa Nuclear Power Plant / Bank of Japan building）。
+  抽象的な話（心・お金の考え方など）は、その場面を表す身近な物（例: stack of Japanese yen coins, calendar on desk, sunrise over city）。
+  人物の顔写真、スポーツの試合、ロゴになる語は避ける。
 - title は「{ch.title}」のままにする。"""
             try:
                 new = llm_json(prompt, Chapter, f"第{i + 1}章の書き足し", temperature=0.7)
@@ -851,46 +865,127 @@ def fetch_pollinations(prompt: str, seed: int) -> bytes | None:
     return None
 
 
-def fetch_pixabay(keyword: str) -> bytes | None:
-    if not PIXABAY_API_KEY:
+PHOTO_CREDITS: dict[str, str] = {}   # 使った写真の出典（説明欄に載せる）。キーは画像のURL
+USED_SOURCES: set[str] = set()       # 実際に使った取り寄せ先
+# 図・地図・ロゴ・古い文書など、「写真」ではないものを名前で除く
+NOT_PHOTO = re.compile(r"map|logo|flag|diagram|chart|graph|coat.of.arms|emblem|seal|insignia|plan|drawing|sketch|"
+                       r"stamp|document|scan|poster|cover|signature|icon|screenshot|\.svg|\.pdf|\.tif", re.I)
+FREE_LICENSE = re.compile(r"^(cc0( 1\.0)?|cc by(-sa)?( [\d.]+)?( [a-z]+)?|public domain|pd(-\S+)?)$", re.I)
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", text or "")).strip()
+
+
+def fetch_wikimedia(keyword: str, used: set) -> tuple[bytes, str, str] | None:
+    """Wikimedia Commons から、自由に使える横長の実写写真を探す。（画像, URL, 出典の一文）を返す。"""
+    try:
+        res = requests.get("https://commons.wikimedia.org/w/api.php", headers=UA, timeout=30, params={
+            "action": "query", "format": "json", "generator": "search", "gsrnamespace": 6, "gsrlimit": 20,
+            "gsrsearch": f"{keyword} filetype:bitmap", "prop": "imageinfo",
+            "iiprop": "url|size|mime|extmetadata", "iiurlwidth": 1920,
+            "iiextmetadatafilter": "Artist|LicenseShortName"})
+        pages = sorted(res.json().get("query", {}).get("pages", {}).values(), key=lambda p: p.get("index", 99))
+    except Exception as e:
+        log.warning(f"Wikimedia エラー: {e}")
         return None
-    for image_type in ("illustration", "photo"):  # 画風を揃えるためイラストを優先
+    for page in pages:
+        info = (page.get("imageinfo") or [{}])[0]
+        title = page.get("title", "")
+        meta = info.get("extmetadata", {})
+        lic = _strip_html(meta.get("LicenseShortName", {}).get("value", ""))
+        url = info.get("thumburl") or info.get("url")
+        if (info.get("mime") != "image/jpeg" or NOT_PHOTO.search(title) or not FREE_LICENSE.search(lic)
+                or info.get("width", 0) < 1000 or info.get("width", 0) < info.get("height", 1) * 1.15
+                or not url or url in used):
+            continue
         try:
-            res = requests.get("https://pixabay.com/api/", timeout=30, params={
-                "key": PIXABAY_API_KEY, "q": keyword, "image_type": image_type,
-                "orientation": "horizontal", "safesearch": "true", "per_page": 5})
-            hits = res.json().get("hits", []) if res.ok else []
-            if hits:
-                return requests.get(hits[0]["largeImageURL"], timeout=60).content  # 高解像度版
+            data = requests.get(url, headers=UA, timeout=60).content
         except Exception as e:
-            log.warning(f"Pixabay エラー: {e}")
+            log.warning(f"Wikimedia の画像を取得できませんでした: {e}")
+            continue
+        artist = _strip_html(meta.get("Artist", {}).get("value", ""))[:60] or "不明"
+        name = re.sub(r"\.jpe?g$", "", title.replace("File:", ""), flags=re.I)[:50]
+        return data, url, f"{name} / {artist} / {lic}（Wikimedia Commons）"
     return None
 
 
-def get_scene_image(prompt: str, keyword: str, path: Path, seed: int) -> Path:
+def fetch_pixabay(keyword: str, used: set) -> tuple[bytes, str, str] | None:
+    """Pixabay の写真素材（イラストは使わない）。"""
+    if not PIXABAY_API_KEY:
+        return None
+    try:
+        res = requests.get("https://pixabay.com/api/", timeout=30, params={
+            "key": PIXABAY_API_KEY, "q": keyword[:100], "image_type": "photo", "orientation": "horizontal",
+            "safesearch": "true", "per_page": 15, "min_width": 1280})
+        for hit in (res.json().get("hits", []) if res.ok else []):
+            url = hit.get("largeImageURL")
+            if url and url not in used:
+                return requests.get(url, timeout=60).content, url, "Pixabay"
+    except Exception as e:
+        log.warning(f"Pixabay エラー: {e}")
+    return None
+
+
+def _shorter(keyword: str) -> str:
+    """見つからないときの検索語：最後の2語だけにする（例: JMSDF destroyer Izumo → destroyer Izumo）。"""
+    words = keyword.split()
+    return " ".join(words[-2:]) if len(words) > 2 else ""
+
+
+def get_scene_image(prompt: str, keyword: str, path: Path, seed: int, used: set | None = None) -> Path | None:
+    """写真を探して保存する。どこにもなければ None（呼び出し側で前の絵を使い回す）。"""
     if path.exists():
         return path
-    for source, raw in (("Pollinations", lambda: fetch_pollinations(prompt, seed)),
-                        ("Pixabay", lambda: fetch_pixabay(keyword))):
-        data = raw()
-        if data:
-            try:
-                prepare_image(data).save(path, "JPEG", quality=92)
-                return path
-            except Exception as e:
-                log.warning(f"{source} の画像を読み込めませんでした: {e}")
-    log.warning(f"画像を取得できなかったため代替画像を使用: {prompt[:50]}")
-    placeholder_image(seed).save(path, "JPEG", quality=92)
-    return path
+    used = used if used is not None else set()
+    tries = []
+    for kw in dict.fromkeys(k for k in (keyword.strip(), _shorter(keyword)) if k):
+        for src in IMAGE_SOURCES:
+            if src == "wikimedia":
+                tries.append(("Wikimedia", lambda kw=kw: fetch_wikimedia(kw, used)))
+            elif src == "pixabay":
+                tries.append(("Pixabay", lambda kw=kw: fetch_pixabay(kw, used)))
+    if "ai" in IMAGE_SOURCES:
+        tries.append(("AI", lambda: (lambda d: (d, f"ai:{seed}", "AI生成") if d else None)(fetch_pollinations(prompt, seed))))
+    for source, fetch in tries:
+        got = fetch()
+        if not got:
+            continue
+        data, url, credit = got
+        try:
+            prepare_image(data).save(path, "JPEG", quality=92)
+        except Exception as e:
+            log.warning(f"{source} の画像を読み込めませんでした: {e}")
+            continue
+        used.add(url)
+        USED_SOURCES.add(source)
+        if source == "Wikimedia":
+            PHOTO_CREDITS[url] = credit
+        log.info(f"　{source}: {keyword}")
+        return path
+    log.warning(f"写真が見つかりませんでした: {keyword}")
+    return None
 
 
 def generate_images(timeline: list[dict], base_seed: int) -> None:
     IMG_DIR.mkdir(parents=True, exist_ok=True)
+    used: set[str] = set()   # 同じ写真を何度も使わない
+    prev = None
     for t in timeline:
         log.info(f"画像 {t['index'] + 1}/{len(timeline)}")
-        t["image"] = str(get_scene_image(t["image_prompt"], t["search_keyword"],
-                                         IMG_DIR / f"scene_{t['index']:03d}.jpg", base_seed + t["index"]))
+        path = IMG_DIR / f"scene_{t['index']:03d}.jpg"
+        got = get_scene_image(t["image_prompt"], t["search_keyword"], path, base_seed + t["index"], used)
+        if got is None and prev is not None:
+            got = prev  # 見つからなければ、前のシーンの写真を別の動きで使い回す（変な絵は出さない）
+            t["camera"] = {"zoom_in": "zoom_out", "zoom_out": "zoom_in",
+                           "pan_left": "pan_right", "pan_right": "pan_left"}.get(t["camera"], "zoom_in")
+        if got is None:
+            placeholder_image(base_seed + t["index"]).save(path, "JPEG", quality=92)
+            got = path
+        t["image"] = prev = str(got)
         time.sleep(IMAGE_INTERVAL)
+    found = sum(1 for t in timeline if Path(t["image"]).name == f"scene_{t['index']:03d}.jpg")
+    log.info(f"写真 {found}/{len(timeline)} シーン分を取得（残りは前の写真を使い回し）")
 
 
 # ============================== 4. 映像 ==============================
@@ -1536,7 +1631,8 @@ def make_thumbnail(script: Script, timeline: list[dict], seed: int) -> Path:
     TW, TH = 1280, 720
     path = WORK / "thumbnail.jpg"
     src = IMG_DIR / "thumbnail_src.jpg"
-    get_scene_image(script.thumbnail_prompt, timeline[0]["search_keyword"], src, seed)
+    if get_scene_image(script.thumbnail_prompt, timeline[0]["search_keyword"], src, seed) is None:
+        src = Path(timeline[0]["image"])  # 見つからなければ1シーン目の写真
     img = Image.open(src).convert("RGB")
     # 中央から 16:9 に切り抜いて、明るく・鮮やかに
     img = img.resize((TW, TH), Image.LANCZOS)
@@ -1592,7 +1688,13 @@ def make_credits(tts: TTS) -> list[str]:
     credits = []
     if tts.credit:
         credits.append(f"音声: {tts.credit}")
-    credits.append("イラスト: AI生成")
+    if "Wikimedia" in USED_SOURCES or "Pixabay" in USED_SOURCES:
+        names = [n for n, k in (("Wikimedia Commons", "Wikimedia"), ("Pixabay", "Pixabay")) if k in USED_SOURCES]
+        credits.append("写真: " + "、".join(names))
+    if "AI" in USED_SOURCES:
+        credits.append("イラスト: AI生成")
+    if PHOTO_CREDITS:  # Wikimedia の写真は作者とライセンスの表示が必要
+        credits.append("写真の出典:\n" + "\n".join(f"・{c}" for c in list(dict.fromkeys(PHOTO_CREDITS.values()))[:30]))
     if BGM_PATH.exists():
         credits.append(f"BGM: {os.getenv('BGM_CREDIT', '（BGMのクレジットを BGM_CREDIT に設定してください）')}")
     return credits
