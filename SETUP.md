@@ -152,7 +152,8 @@ Actions タブ → 「YouTube Auto-Production Pipeline」→ **Run workflow** �
 | `SELFHELP_WEEKDAY` | 1 | 企画3を「心・考え方の自己啓発」にする曜日（既定は火曜、-1で無効）。企画案のジョブの env に追加して変更 |
 | `EXCLUDE_KEYWORDS` | なし | 企画にしないジャンルの言葉を追加（カンマ区切り）。スポーツ（特にバスケ）は最初から除外済み |
 | `SHORTS_COUNT` | 2 | 本編と一緒に作るショート動画の本数（0 で作らない） |
-| `SHORT_MAX_SEC` | 58 | ショートの最大の長さ（秒） |
+| `SHORT_MAX_SEC` | 35 | ショートの最大の長さ（秒）。短いほど最後まで見られやすい |
+| `SHORT_SPEED` | 1.15 | ショートの読み上げ速度（本編は VOICEVOX_SPEED） |
 | `GEMINI_MODELS` | `gemini-2.5-flash,gemini-2.5-flash-lite` | 使うモデル（左から順に試行）。新しいモデルが出たら先頭に追加 |
 | `IMAGE_STYLE` | アニメ調 | 全画像に共通で付ける画風の指定 |
 | `VOICEVOX_SPEED` | 1.05 | 話す速さ（視聴者の中心が50代以上なので少しゆっくりめ） |

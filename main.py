@@ -668,6 +668,8 @@ class TTS:
             pass
         return "白上虎太郎"
 
+    speed = VOICEVOX_SPEED  # ショートでは一時的に速くする
+
     def synth(self, text: str) -> tuple[np.ndarray, list | None]:
         """音声と口パク用のタイミング [(開始秒, 終了秒, 口の形), ...] を返す。
         口の形は a/i/u/e/o/n（n=閉じ）。gTTS ではタイミングが取れないため None。"""
@@ -688,7 +690,7 @@ class TTS:
                           params={"text": text, "speaker": VOICEVOX_SPEAKER}, timeout=120)
         q.raise_for_status()
         query = q.json()
-        query.update({"speedScale": VOICEVOX_SPEED, "outputSamplingRate": SR, "outputStereo": False,
+        query.update({"speedScale": self.speed, "outputSamplingRate": SR, "outputStereo": False,
                       "prePhonemeLength": 0.05, "postPhonemeLength": 0.05})
         r = requests.post(f"{VOICEVOX_URL}/synthesis", params={"speaker": VOICEVOX_SPEAKER},
                           json=query, timeout=300)
@@ -1619,7 +1621,10 @@ def build_metadata(script: Script, timeline: list[dict], tts: TTS) -> dict:
 # 画像は本編のものを使い回すので、画像生成の追加はない。
 
 SHORTS_COUNT = int(os.getenv("SHORTS_COUNT", "2"))       # 0 にするとショートを作らない
-SHORT_MAX_SEC = float(os.getenv("SHORT_MAX_SEC", "58"))  # ショートの最大の長さ（秒）
+# 「スワイプされずに見られた割合」を上げるため、短く・速く・最初の1秒で引き込む
+SHORT_MAX_SEC = float(os.getenv("SHORT_MAX_SEC", "35"))  # ショートの最大の長さ（秒）。短いほど最後まで見られやすい
+SHORT_SPEED = float(os.getenv("SHORT_SPEED", "1.15"))    # ショートの読み上げ速度（本編よりテンポよく）
+HOOK_POP_SEC = 0.35                                       # 冒頭で見出しが「ポン」と出る時間
 SW, SH = 1080, 1920                                       # 縦長
 SHORT_GAP = 0.15                                          # ショートは間を詰めてテンポよく
 PANEL_Y, PANEL_W, PANEL_H = 300, 1080, 810                # 中央の絵の位置と大きさ（4:3）
@@ -1635,7 +1640,8 @@ class ShortScene(BaseModel):
 
 class Short(BaseModel):
     title: str = Field(description="ショートのタイトル（日本語、30文字以内、ハッシュタグは付けない）")
-    hook_text: str = Field(description="画面上部にずっと表示する見出し。2行（改行\\nで区切る）、各行2〜9文字。単語の途中で改行しない")
+    hook_text: str = Field(description="画面上部にずっと表示する見出し。答えを言わずに続きが気になる問いかけか数字。"
+                                       "2行（改行\\nで区切る）、各行2〜9文字。単語の途中で改行しない")
     scenes: list[ShortScene]
 
 
@@ -1650,7 +1656,7 @@ def plan_shorts(script: Script) -> list[Short]:
         for sc in ch.scenes:
             no += 1
             numbered.append(f"[{no}] {sc.narration}")
-    chars_min, chars_max = int(SHORT_MAX_SEC * 4.0), int(SHORT_MAX_SEC * 4.8)
+    chars_min, chars_max = int(SHORT_MAX_SEC * 4.2), int(SHORT_MAX_SEC * 5.0)
     prompt = f"""あなたは YouTube ショート動画の構成作家です。次の本編動画の台本から、ショート動画（縦長・1分以内）を{SHORTS_COUNT}本作ってください。
 
 # 本編のタイトル
@@ -1661,16 +1667,23 @@ def plan_shorts(script: Script) -> list[Short]:
 
 # ショートの要件
 - 1本のショートは、本編の中で最も意外で「へえ」となる話題1つに絞る。ショート同士で話題を重ねない。
-- 1シーン目は、2秒で指が止まる問いかけか意外な事実から始める（あいさつはしない）。
-- ナレーション合計は{chars_min}〜{chars_max}文字。1シーンは1〜2文、20〜60文字。6〜10シーン。
+- 視聴者の半分が最初の1〜2秒でスワイプしている。1シーン目がすべてを決める。
+  - 1シーン目は25文字以内の1文。具体的な数字か、常識をくつがえす事実か、答えを知りたくなる問いかけ。
+  - 「みなさん」「今日は」「〜を知っていますか」などの前置き・あいさつは禁止。いきなり核心から入る。
+  - 答え（オチ）は1シーン目では言わず、最後の方まで引っぱる。
+- ナレーション合計は{chars_min}〜{chars_max}文字（約{SHORT_MAX_SEC:.0f}秒）。1シーンは1〜2文、15〜45文字。4〜7シーン。
+- 説明はテンポよく。1シーンに1つの情報だけ。「〜なんです」「実は」で話をつなぐ。
 - 事実は本編の台本に書かれていることだけを使う。
-- 最後のシーンは「続きは本編で詳しく解説しています」のように、本編へ自然に誘導して終える。
+- 最後のシーンは「続きは本編で」などの締めのあいさつをしない（終わりの合図になってスワイプされる）。
+  オチを言ったあと、1シーン目にそのまま戻って聞こえる一言で終える（ループして2回目も見てもらうため）。
+  本編への案内は説明欄に自動で入るので、ナレーションには入れない。
 - 記号・絵文字・括弧書きは使わない（音声合成で読み上げるため）。
 - FBI・NATO・AI などの英字の略語は、カタカナにせず英字のまま書く。
 - 数字は算用数字で書く（例: 1.5倍、65本、2024年）。
 - source_scene には、そのシーンの内容に最も合う本編シーンの番号を入れる。同じ番号を3回以上続けない。
-- expression は、意外な事実→surprised、問いかけ→thinking、締め→smile、それ以外→normal。半分以上は normal にする。
-- hook_text は、画面上部に大きく出す見出し。タイトルより短く、強い言葉で。"""
+- expression は、意外な事実→surprised、問いかけ→thinking、締め→smile、それ以外→normal。1シーン目は surprised。
+- hook_text は、画面上部に大きく出す見出し。タイトルより短く、答えは書かずに「なぜ？」「何？」と思わせる。
+- title も答えを書かずに、続きが気になる言い方にする。"""
     plan = llm_json(prompt, ShortsPlan, "ショートの構成", temperature=0.7)
     shorts = []
     for sh in plan.shorts[:SHORTS_COUNT]:
@@ -1684,6 +1697,7 @@ def plan_shorts(script: Script) -> list[Short]:
                 sc.expression = "normal"
             scenes.append(sc)
         if scenes:
+            scenes[0].expression = "surprised"  # 1シーン目は表情でも引きつける
             sh.scenes = scenes
             shorts.append(sh)
     return shorts
@@ -1811,7 +1825,14 @@ class ShortRenderer:
         end = sc["start"] + sc["duration"]
         if idx + 1 < len(self.tl) and t > end - FADE:
             frame = Image.blend(frame, self._scene_frame(idx + 1, 0.0), smoothstep((t - (end - FADE)) / FADE))
-        frame.paste(self.hook, (0, 0), self.hook)
+        if t < HOOK_POP_SEC:  # 冒頭0.35秒で見出しが大きめから「ポン」と収まる（最初のフレームから動きを出す）
+            p = smoothstep(t / HOOK_POP_SEC)
+            scale = 1.25 - 0.25 * p
+            hw, hh = int(SW * scale), int(PANEL_Y * scale)
+            hook = self.hook.resize((hw, hh), Image.BILINEAR)
+            frame.paste(hook, ((SW - hw) // 2, (PANEL_Y - hh) // 2), hook)
+        else:
+            frame.paste(self.hook, (0, 0), self.hook)
 
         if self.char.enabled:
             fi = min(fi, self.n_frames - 1)
@@ -1840,6 +1861,7 @@ def make_shorts(script: Script, long_tl: list[dict], tts: TTS, credits: list[str
         log.warning(f"ショートの構成を作れなかったため、ショートは作りません: {str(e)[:200]}")
         return []
     results = []
+    tts.speed = SHORT_SPEED
     for i, sh in enumerate(shorts, 1):
         try:
             log.info(f"ショート{i}: {sh.title}（{len(sh.scenes)}シーン）")
@@ -1854,6 +1876,7 @@ def make_shorts(script: Script, long_tl: list[dict], tts: TTS, credits: list[str
         except Exception as e:
             log.warning(f"ショート{i}の作成に失敗しました（本編はそのまま続行）: {str(e)[:200]}")
             log.warning(traceback.format_exc())
+    tts.speed = VOICEVOX_SPEED
     (WORK / "shorts.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     return results
 
