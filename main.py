@@ -94,6 +94,8 @@ CHANNEL_THEME = os.getenv("CHANNEL_THEME") or "幅広いジャンルの雑学・
 
 CAMERA_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 EXPRESSIONS = ("normal", "smile", "surprised", "thinking")
+# 実際に使う表情。ここにない表情は「通常（口パクあり）」で喋らせる。例: normal だけにすると、ずっと喋っている見た目になる
+CHAR_EXPRESSIONS = {e.strip() for e in (os.getenv("CHAR_EXPRESSIONS") or "normal,thinking").split(",") if e.strip()}
 
 # 解説キャラクター（assets/character/*.png があれば画面右下に表示）
 CHARACTER_DIR = Path(os.getenv("CHARACTER_DIR", "assets/character"))
@@ -1601,6 +1603,8 @@ class Character:
 
     def get(self, expression: str, mouth: str = "n") -> Image.Image:
         """「通常」の表情（または表情素材がない場合）は口パク用の絵を使う。"""
+        if expression not in CHAR_EXPRESSIONS:  # 使わない表情（笑顔・驚き顔など）は、口パクの通常の顔にする
+            expression = "normal"
         if self.talk and (expression == "normal" or expression not in self.sprites):
             return self.talk.get(mouth, self.talk["n"])
         return self.sprites.get(expression) or self.sprites["normal"]

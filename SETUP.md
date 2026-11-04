@@ -217,3 +217,9 @@ Artifacts の `research.md`（取材メモ）と `review.json`（採点と指摘
 ## 動画素材を増やす（任意・無料）
 
 [Pexels](https://www.pexels.com/api/) に無料登録（カード不要）して API キーを取得し、Secrets に `PEXELS_API_KEY` として登録すると、動画素材の候補が増えます。未設定でも Wikimedia Commons と Pixabay の動画素材は使われます。
+
+## 解説キャラの表情
+
+| 変数（Variables） | 既定値 | 説明 |
+|---|---|---|
+| `CHAR_EXPRESSIONS` | normal,thinking | 使う表情（normal / smile / surprised / thinking）。ここにない表情は、口パクする通常の顔になる。`normal` だけにすると、ずっと喋っている見た目になる |
