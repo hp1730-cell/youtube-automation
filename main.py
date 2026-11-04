@@ -95,7 +95,7 @@ CHANNEL_THEME = os.getenv("CHANNEL_THEME") or "幅広いジャンルの雑学・
 CAMERA_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 EXPRESSIONS = ("normal", "smile", "surprised", "thinking")
 # 実際に使う表情。ここにない表情は「通常（口パクあり）」で喋らせる。例: normal だけにすると、ずっと喋っている見た目になる
-CHAR_EXPRESSIONS = {e.strip() for e in (os.getenv("CHAR_EXPRESSIONS") or "normal,thinking").split(",") if e.strip()}
+CHAR_EXPRESSIONS = {e.strip() for e in (os.getenv("CHAR_EXPRESSIONS") or "normal").split(",") if e.strip()}
 
 # 解説キャラクター（assets/character/*.png があれば画面右下に表示）
 CHARACTER_DIR = Path(os.getenv("CHARACTER_DIR", "assets/character"))

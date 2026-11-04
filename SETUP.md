@@ -222,4 +222,4 @@ Artifacts の `research.md`（取材メモ）と `review.json`（採点と指摘
 
 | 変数（Variables） | 既定値 | 説明 |
 |---|---|---|
-| `CHAR_EXPRESSIONS` | normal,thinking | 使う表情（normal / smile / surprised / thinking）。ここにない表情は、口パクする通常の顔になる。`normal` だけにすると、ずっと喋っている見た目になる |
+| `CHAR_EXPRESSIONS` | normal | 使う表情（normal / smile / surprised / thinking）。ここにない表情は、口パクする通常の顔になる。`normal` だけにすると、ずっと喋っている見た目になる |
