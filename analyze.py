@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from json_repair import repair_json
 
-from discord_utils import post_message, get_messages
+from discord_utils import post_message, get_messages, get_history
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("analyze")
@@ -76,6 +76,94 @@ def plan_text_all(p: dict) -> str:
     return " ".join([str(p.get(k, "")) for k in ("title", "hook", "summary", "why_now")] + [str(x) for x in p.get("outline", [])])
 
 
+# ---------------------------------------------------------------- 過去の動画と似た企画を出さない
+
+# タイトルによく出るが、話題の中身を表さない言葉（似ているかの判定では数えない）
+GENERIC_WORDS = {"日本", "理由", "真相", "秘密", "意外", "本当", "驚き", "衝撃", "解説", "まとめ", "世界", "歴史", "最新",
+                 "方法", "話題", "知識", "雑学", "事実", "正体", "仕組", "仕組み", "結末", "ヤバ", "シニア", "人生"}
+
+
+def past_titles() -> list[str]:
+    """Discord の「アップロードしました」の通知から、これまでに作った動画（本編・ショート）のタイトルを集める。"""
+    titles = []
+    try:
+        for m in get_history(1500):
+            text = m.get("content", "")
+            if "アップロードしました" not in text:
+                continue
+            titles += re.findall(r"^「(.+?)」$", text, re.M)              # 本編
+            titles += re.findall(r"ショート\d+「(.+?)」", text)          # ショート
+    except Exception as e:
+        log.warning(f"過去の動画タイトルを取得できませんでした: {e}")
+    titles = list(dict.fromkeys(t.strip() for t in titles if t.strip()))
+    log.info(f"過去の動画 {len(titles)} 本と重ならないように企画します。")
+    return titles
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[\s　!！?？、。,.・「」『』【】（）()\[\]\-ー〜~…#＃:：/／|｜\"'“”]", "", text or "").lower()
+
+
+def _key_terms(text: str) -> set[str]:
+    """話題の中身を表す言葉（2文字以上のカタカナ・漢字・英数字のまとまり）。"""
+    terms = set(re.findall(r"[ァ-ヴー]{2,}|[一-龥々]{2,}|[a-zA-Z0-9][a-zA-Z0-9\-]+", text or ""))
+    return {t.lower() for t in terms if t not in GENERIC_WORDS}
+
+
+def _bigrams(text: str) -> set[str]:
+    t = _norm(text)
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def similar_past(title: str, past: list[str]) -> str | None:
+    """過去のタイトルと「同じような内容」なら、そのタイトルを返す。
+    文字の重なりが3割以上、または話題の言葉が2つ以上共通（例: F-35・重り）なら似ているとみなす。"""
+    b, k = _bigrams(title), _key_terms(title)
+    for old in past:
+        ob = _bigrams(old)
+        jac = len(b & ob) / max(1, len(b | ob))
+        if jac >= 0.3 or len(k & _key_terms(old)) >= 2:
+            return old
+    return None
+
+
+def ai_duplicates(plans: list[dict], past: list[str]) -> dict[str, str]:
+    """AI に「過去の動画と同じ内容か」を判定させる。{企画タイトル: 似ている過去のタイトル} を返す。
+    同じ題材でも切り口が大きく違えば別物とする。失敗したら空（文字の重なりの判定だけになる）。"""
+    if not past or not plans:
+        return {}
+    try:
+        from groq import Groq
+        client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        cand = "\n".join(f"{i}. {p.get('title', '')}：{p.get('summary', '')[:120]}" for i, p in enumerate(plans))
+        old = "\n".join(f"- {t}" for t in past[:150])
+        prompt = f"""YouTube チャンネルの新しい企画案が、過去に作った動画と「同じような内容」かを判定してください。
+同じ題材で、視聴者が「前にも見た」と感じる内容なら重複です（例:「F-35に重りが積まれた理由」と「F-35がレーダーの代わりに重りを積んで納入」）。
+同じ題材でも、話の中心がまったく違えば重複ではありません（例:「F-35の重り」と「F-35の価格の決まり方」）。
+
+# 新しい企画案
+{cand}
+
+# 過去の動画
+{old}
+
+# 出力
+JSON のみ: {{"duplicates": [{{"index": 企画案の番号, "past": "似ている過去の動画タイトル"}}]}}（重複がなければ空の配列）"""
+        res = client.chat.completions.create(model=GROQ_MODEL, temperature=0,
+                                             messages=[{"role": "user", "content": prompt}],
+                                             response_format={"type": "json_object"})
+        data = json.loads(repair_json(res.choices[0].message.content or "{}"))
+        out = {}
+        for d in data.get("duplicates", []) if isinstance(data, dict) else []:
+            i = d.get("index")
+            if isinstance(i, int) and 0 <= i < len(plans):
+                out[plans[i].get("title", "")] = str(d.get("past", ""))
+        return out
+    except Exception as e:
+        log.warning(f"AI による重複チェックに失敗（文字の重なりだけで判定します）: {e}")
+        return {}
+
+
 def today_slot():
     """今日が特別枠の曜日なら (印, 指示) を返す。"""
     wd = datetime.now(JST).weekday()
@@ -134,7 +222,7 @@ def slot_rule() -> str:
     return slot[1] if slot else ""
 
 
-def build_prompt(trends: list[str], popular: list[str]) -> str:
+def build_prompt(trends: list[str], popular: list[str], past: list[str] | None = None) -> str:
     today = datetime.now(JST).strftime("%Y年%m月%d日")
     trend_txt = "\n".join(f"- {t}" for t in trends) or "（取得できませんでした）"
     pop_txt = "\n".join(f"- {p}" for p in popular) or "（取得できませんでした）"
@@ -151,12 +239,12 @@ def build_prompt(trends: list[str], popular: list[str]) -> str:
 {pop_txt}
 
 # 条件
-- 動画は約8分、AI生成のイラストとナレーションで構成する。実写映像・有名人の顔・他社の映像は使えない前提で成立する企画にする。
+- 動画は約8分、無料の実写の動画素材・写真とナレーションで構成する。有名人の顔・他社の映像（テレビ番組など）は使えない前提で成立する企画にする。
 - 速報性に頼りすぎず、数週間は見られる「解説・雑学・まとめ」の切り口にする。
 - 事実確認が難しいゴシップ、事件の被害者、政治的に偏った主張は避ける。
 - スポーツ（特にバスケットボール）に関する企画は出さない。試合・選手・チーム・リーグ・大会の話題も含めて、すべて対象外とする。
 - 3つは互いにジャンルや切り口を変える。
-{slot_rule()}
+{slot_rule()}{past_rule(past or [])}
 # 出力
 次の形式の JSON のみを出力してください。
 {{"plans": [
@@ -166,6 +254,15 @@ def build_prompt(trends: list[str], popular: list[str]) -> str:
     "outline": ["章1の内容", "章2の内容", "章3の内容", "章4の内容"],
     "why_now": "今この企画がウケる理由（参考にしたトレンド）"}}
 ]}}"""
+
+
+def past_rule(past: list[str]) -> str:
+    if not past:
+        return ""
+    lst = "\n".join(f"- {t}" for t in past[:80])
+    return ("\n# これまでに作った動画（同じ話題・同じ切り口の企画は出さない）\n"
+            "下の動画と同じ題材（同じ機体・同じ制度・同じ出来事など）を扱う企画は禁止。"
+            "別の題材を選ぶこと。\n" + lst + "\n")
 
 
 def extract_plans(data) -> list[dict]:
@@ -196,22 +293,55 @@ def generate_plans(prompt: str) -> list[dict]:
     return plans[:3]
 
 
-def generate_valid_plans(prompt: str) -> list[dict]:
-    """スポーツなど扱わないジャンルの企画が混ざっていたら、作り直す（最大3回）。"""
-    best = []
-    for attempt in range(3):
+def generate_valid_plans(prompt: str, past: list[str] | None = None) -> list[dict]:
+    """スポーツなど扱わないジャンルの企画や、過去の動画と似た企画が混ざっていたら、作り直す（最大4回）。
+    作り直しで出た良い企画は取っておき、合わせて3つそろえる。週1の特別枠の日は、3つ目を特別枠の企画にする。"""
+    past = past or []
+    has_slot = bool(today_slot())
+    main_pool: list[dict] = []   # 企画1・2（特別枠がない日は1〜3）
+    slot_pool: list[dict] = []   # 特別枠（企画3）
+
+    def enough() -> bool:
+        return (len(main_pool) >= 2 and slot_pool) if has_slot else len(main_pool) >= 3
+
+    def result() -> list[dict]:
+        if has_slot and slot_pool:
+            slot_pool[0]["_slot"] = True  # 「特別枠の日です」の表示を付ける目印
+        return (main_pool[:2] + slot_pool[:1]) if has_slot else main_pool[:3]
+
+    for attempt in range(4):
         plans = generate_plans(prompt)
-        bad = [p for p in plans if is_excluded(plan_text_all(p))]
-        if not bad and len(plans) >= 3:
-            return plans
-        log.warning(f"扱わないジャンルの企画が {len(bad)} 件あったため作り直します（{attempt + 1}回目）: "
-                    + " / ".join(p.get("title", "") for p in bad))
-        good = [p for p in plans if not is_excluded(plan_text_all(p))]
-        if len(good) > len(best):
-            best = good
-        prompt += ("\n\n# 注意\n前回はスポーツに関する企画が含まれていました。スポーツ（特にバスケットボール）の企画は"
-                   "1つも入れずに、3つすべて別のジャンルで作り直してください。")
-    return best
+        ai_dup = ai_duplicates([p for p in plans if not is_excluded(plan_text_all(p))], past)
+        sports, dup = [], []
+        for i, p in enumerate(plans):
+            title = p.get("title", "")
+            taken = [g.get("title", "") for g in main_pool + slot_pool]
+            if is_excluded(plan_text_all(p)):
+                sports.append(title)
+            elif (old := ai_dup.get(title) or similar_past(title, past) or similar_past(title, taken)):
+                dup.append(f"{title}（←「{old}」と似ている）")
+            elif has_slot and i == 2:
+                slot_pool.append(p)
+            else:
+                main_pool.append(p)
+        if enough():
+            return result()
+        notes = []
+        if sports:
+            log.warning("扱わないジャンルの企画: " + " / ".join(sports))
+            notes.append("スポーツ（特にバスケットボール）の企画は1つも入れない。")
+        if dup:
+            log.warning("過去の動画と似ている企画: " + " / ".join(dup))
+            notes.append("次の企画は過去の動画と題材が同じだったので、まったく別の題材にする: " + " / ".join(dup))
+        if main_pool or slot_pool:
+            notes.append("次の企画はすでに採用済みなので、これらとも別の題材にする: "
+                         + " / ".join(g.get("title", "") for g in main_pool + slot_pool))
+        prompt += f"\n\n# 作り直し（{attempt + 1}回目）\n" + "\n".join(f"- {n}" for n in notes) + \
+                  "\n3つすべて、条件を満たす新しい企画を出してください。"
+    out = result()
+    if has_slot and not slot_pool:  # 特別枠が作れなかったときは、普通の企画で埋める
+        out = main_pool[:3]
+    return out
 
 
 def format_plan(no: int, p: dict) -> str:
@@ -276,8 +406,9 @@ def send_plans():
         return
     trends = [t for t in fetch_google_trends() if not is_excluded(t)]      # スポーツの話題は最初から渡さない
     popular = [p for p in fetch_youtube_popular() if not is_excluded(p)]
+    past = past_titles()
     try:
-        plans = generate_valid_plans(build_prompt(trends, popular))
+        plans = generate_valid_plans(build_prompt(trends, popular, past), past)
         if not plans:
             raise RuntimeError("条件に合う企画を作れませんでした。")
     except Exception as e:
@@ -286,7 +417,7 @@ def send_plans():
         sys.exit(1)
 
     today = datetime.now(JST).strftime("%m/%d")
-    slot = today_slot() if len(plans) >= 3 else None
+    slot = today_slot() if len(plans) >= 3 and plans[2].get("_slot") else None
     post_message(f"📅 **{today} の企画案です**\n作りたい企画の番号（1〜3）をこのチャンネルに送信してください。"
                  f"12時台までに返信すると、動画を作成して非公開でアップロードします。"
                  + (f"\n今日は「{slot[0]}」の日です（企画3）。" if slot else ""))

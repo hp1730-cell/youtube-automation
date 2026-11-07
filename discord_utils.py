@@ -77,6 +77,23 @@ def get_messages(limit: int = 50) -> list[dict]:
     return res.json()
 
 
+def get_history(max_messages: int = 1000) -> list[dict]:
+    """過去のメッセージを新しい順に最大 max_messages 件まで、さかのぼって取得する。"""
+    out, before = [], None
+    while len(out) < max_messages:
+        params = {"limit": 100}
+        if before:
+            params["before"] = before
+        batch = _request("GET", f"{API}/channels/{_channel()}/messages", params=params).json()
+        if not batch:
+            break
+        out += batch
+        before = batch[-1]["id"]
+        if len(batch) < 100:
+            break
+    return out
+
+
 def add_reaction(message_id: str, emoji: str) -> None:
     e = urllib.parse.quote(emoji)
     _request("PUT", f"{API}/channels/{_channel()}/messages/{message_id}/reactions/{e}/@me")
