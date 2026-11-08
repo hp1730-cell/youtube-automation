@@ -59,7 +59,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODELS = [m.strip() for m in os.getenv("GROQ_MODELS", "openai/gpt-oss-120b,llama-3.3-70b-versatile").split(",") if m.strip()]
 
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
-PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")  # 任意（動画素材をもっと増やしたいとき。無料・カード不要）
+# 任意（動画素材をもっと増やしたいとき。無料・カード不要）。貼り付け時に混ざった空白・改行・全角文字は取り除く
+PEXELS_API_KEY = re.sub(r"[^A-Za-z0-9]", "", os.getenv("PEXELS_API_KEY") or "") or None
 POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN")
 POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux")
 IMAGE_INTERVAL = float(os.getenv("IMAGE_INTERVAL", "1"))   # 画像 API の呼び出し間隔（秒）
@@ -906,7 +907,7 @@ def fetch_wikimedia(keyword: str, used: set) -> tuple[bytes, str, str] | None:
     for page in pages:
         info = (page.get("imageinfo") or [{}])[0]
         title = page.get("title", "")
-        meta = info.get("extmetadata", {})
+        meta = info.get("extmetadata") if isinstance(info.get("extmetadata"), dict) else {}  # 情報がないと [] で返る
         lic = _strip_html(meta.get("LicenseShortName", {}).get("value", ""))
         url = info.get("thumburl") or info.get("url")
         if (info.get("mime") != "image/jpeg" or NOT_PHOTO.search(title) or not FREE_LICENSE.search(lic)
@@ -973,7 +974,7 @@ def fetch_wikimedia_video(keyword: str, used: set, need: float) -> tuple[str, fl
     for page in pages:
         info = (page.get("imageinfo") or [{}])[0]
         title = page.get("title", "")
-        meta = info.get("extmetadata", {})
+        meta = info.get("extmetadata") if isinstance(info.get("extmetadata"), dict) else {}  # 情報がないと [] で返る
         lic = _strip_html(meta.get("LicenseShortName", {}).get("value", ""))
         url, dur = info.get("url"), float(info.get("duration") or 0)
         if (not str(info.get("mime", "")).startswith("video/") or NOT_PHOTO.search(title)
@@ -1088,9 +1089,13 @@ def get_scene_clip(t: dict, used: set) -> bool:
     vkws = _kw_variants(t.get("video_keyword") or t["search_keyword"])
     skws = _kw_variants(t["search_keyword"])
     tries = []
-    for src in IMAGE_SOURCES:
+    order = list(IMAGE_SOURCES)
+    if "wikimedia_video" in order and not is_specific(t["search_keyword"]):  # 一般的な場面は動画素材サイトを先に
+        order.remove("wikimedia_video")
+        order.append("wikimedia_video")
+    for src in order:
         if src == "wikimedia_video":
-            tries += [("Wikimedia", kw, fetch_wikimedia_video) for kw in skws]
+            tries += [("Wikimedia", kw, fetch_wikimedia_video) for kw in skws if is_specific(kw)]
         elif src == "pixabay_video":
             tries += [("Pixabay", kw, fetch_pixabay_video) for kw in vkws]
         elif src == "pexels_video":
@@ -1138,10 +1143,23 @@ def get_scene_clip(t: dict, used: set) -> bool:
     return True
 
 
+SMALL_WORDS = {"a", "an", "the", "on", "in", "at", "of", "for", "with", "to", "and", "or", "from", "by", "over",
+               "under", "into", "near", "inside", "outside", "close", "up", "shot", "view", "closeup"}
+
+
 def _shorter(keyword: str) -> str:
-    """見つからないときの検索語：最後の2語だけにする（例: JMSDF destroyer Izumo → destroyer Izumo）。"""
+    """見つからないときの検索語：意味のある最後の2語だけにする（例: JMSDF destroyer Izumo → destroyer Izumo、
+    pen on desk → pen desk）。「on desk」のような意味の薄い語にはしない。"""
+    words = [w for w in keyword.split() if w.lower() not in SMALL_WORDS]
+    short = " ".join(words[-2:])
+    return short if len(words) >= 2 and short.lower() != keyword.lower() else ""
+
+
+def is_specific(keyword: str) -> bool:
+    """固有名詞（艦名・機体名・地名・組織名）を含む検索語か。例: JMSDF destroyer Izumo / F-35A / Tokyo station。
+    「living room」のような一般的な語は、Wikimedia だと素人の映像ばかりになるので動画素材サイトを優先する。"""
     words = keyword.split()
-    return " ".join(words[-2:]) if len(words) > 2 else ""
+    return any(re.search(r"\d|[A-Z]{2,}", w) for w in words) or any(w[:1].isupper() for w in words[1:])
 
 
 def get_scene_image(prompt: str, keyword: str, path: Path, seed: int, used: set | None = None) -> Path | None:
