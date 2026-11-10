@@ -371,13 +371,55 @@ REPLY_DEADLINE_HOUR = int(os.getenv("REPLY_DEADLINE_HOUR", "13"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))
 
 
+# GitHub の定期実行は数時間遅れるのが普通なので、早朝から何度も起動をかけておき、
+# 早く起動できた回がこの時刻（JST）まで待ってから企画案を送る
+SEND_HOUR = int(os.getenv("PLAN_SEND_HOUR", "8"))
+EARLY_WAIT_MAX_MIN = 150                      # 送信時刻のこれより前に起動した回は、何もせず終わる（後の回に任せる）
+STARTED = datetime.now(JST)
+JOB_BUDGET = timedelta(hours=5, minutes=10)   # 1回の実行で使える時間（GitHub の上限より少し短く）
+
+
+def wait_until_send_time() -> bool:
+    """定期実行が送信時刻より前に起動したら、送信時刻まで待つ。早すぎる回は False を返して何もしない。"""
+    import time
+    if os.getenv("GITHUB_EVENT_NAME") != "schedule":
+        return True
+    now = datetime.now(JST)
+    send_at = now.replace(hour=SEND_HOUR, minute=0, second=0, microsecond=0)
+    if now >= send_at:
+        return True
+    wait = (send_at - now).total_seconds()
+    if wait > EARLY_WAIT_MAX_MIN * 60:
+        log.info(f"送信時刻（{SEND_HOUR}:00）まで {wait / 60:.0f}分あるため、この回は何もしません（後の回が送ります）。")
+        return False
+    log.info(f"送信時刻（{SEND_HOUR}:00）まで {wait / 60:.0f}分待ちます。")
+    time.sleep(wait)
+    return True
+
+
+def relay_watch() -> None:
+    """実行時間の上限が近いとき、返信の待ち受けだけを行う次の実行を起動して引き継ぐ。"""
+    pat, repo = os.getenv("GH_PAT"), os.getenv("GITHUB_REPOSITORY")
+    if not pat or not repo:
+        return
+    try:
+        r = requests.post(
+            f"https://api.github.com/repos/{repo}/actions/workflows/{os.getenv('WORKFLOW_FILE', 'auto_pipeline.yml')}/dispatches",
+            headers={"Authorization": f"Bearer {pat}", "Accept": "application/vnd.github+json"},
+            json={"ref": "main", "inputs": {"action_mode": "watch_replies"}}, timeout=30)
+        log.info(f"返信の待ち受けを次の実行に引き継ぎました（{r.status_code}）。")
+    except Exception as e:
+        log.warning(f"待ち受けの引き継ぎに失敗: {e}")
+
+
 def wait_for_reply():
     """返信（1〜3）が来るまで、締め切りまで数分おきに Discord を確認する。
     来たらその場で動画生成を起動する（毎時の返信チェックに頼らないため）。"""
     import time
     import check_discord
     now = datetime.now(JST)
-    deadline = now.replace(hour=REPLY_DEADLINE_HOUR, minute=0, second=0, microsecond=0)
+    final = now.replace(hour=REPLY_DEADLINE_HOUR, minute=0, second=0, microsecond=0)
+    deadline = min(final, STARTED + JOB_BUDGET)  # 早朝に起動した回は、途中で次の実行に引き継ぐ
     if now >= deadline:
         log.info("返信の受付時間を過ぎているため、待ち受けはしません。")
         return
@@ -391,10 +433,18 @@ def wait_for_reply():
             log.warning(f"返信の確認でエラー（続けて待ちます）: {e}")
         remaining = (deadline - datetime.now(JST)).total_seconds()
         time.sleep(max(1, min(POLL_SECONDS, remaining)))
+    if datetime.now(JST) < final:
+        relay_watch()
+        return
     log.info("受付時間内に返信がありませんでした。")
 
 
 def main():
+    if os.getenv("ACTION_MODE") == "watch_replies":  # 引き継ぎ：返信の待ち受けだけ
+        wait_for_reply()
+        return
+    if not wait_until_send_time():
+        return
     send_plans()
     wait_for_reply()
 

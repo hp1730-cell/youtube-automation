@@ -1,7 +1,9 @@
 name: YouTube Auto-Production Pipeline
 
 # ─────────────────────────────────────────────────────────────
-# ・企画案の送信 : 毎朝 JST 8:07 ごろ（予備: 8:47 / 9:37 / 10:27。送信済みならスキップ）
+# ・企画案の送信 : 毎朝 JST 8:00。GitHub の定期実行は3〜5時間遅れるのが普通なので、JST 1:07〜7:07 に毎時起動をかけ、
+#                  5:30〜8:00 の間に起動できた回が 8:00 まで待ってから送る（それより早い回は何もせず終了）。
+#                  8:00 を過ぎて起動した回は、未送信ならすぐ送る（予備: 8:07 / 8:47 / 9:37 / 10:27）
 # ・返信チェック : 企画案の送信後、同じ実行が13時まで5分おきに待ち受ける（毎時のチェックは予備）
 # ・動画生成     : 返信チェックが workflow_dispatch で起動（手動実行も可）
 # ※ ジョブの振り分けは「時刻」ではなく「どの cron で起動されたか」で判定するため、
@@ -11,6 +13,7 @@ name: YouTube Auto-Production Pipeline
 on:
   schedule:
     # GitHub の定期実行は混雑時に遅れたり飛ばされたりするため、予備のタイミングも用意している
+    - cron: '7 16-22 * * *'         # 企画案送信の早朝起動 (JST 1:07〜7:07 の毎時。遅れを見越して早めに起動し、8:00 まで待って送る)
     - cron: '7 23 * * *'            # 企画案送信 (UTC 23:07 = JST 8:07)
     - cron: '47 23 * * *'           # 企画案送信の予備 (JST 8:47)  ※その日の企画案が送信済みなら何もしない
     - cron: '37 0 * * *'            # 企画案送信の予備 (JST 9:37)
@@ -27,6 +30,7 @@ on:
         options:
           - analyze
           - check_replies
+          - watch_replies
           - generate_video
       video_title:
         description: '動画のテーマ（generate_video を手動実行するとき用）'
@@ -48,7 +52,7 @@ permissions:
 jobs:
   # --- ジョブ1：トレンド分析 → Discord に企画案を送信 ---
   trend_analysis:
-    if: contains(fromJSON('["7 23 * * *", "47 23 * * *", "37 0 * * *", "27 1 * * *"]'), github.event.schedule) || (github.event_name == 'workflow_dispatch' && inputs.action_mode == 'analyze')
+    if: contains(fromJSON('["7 16-22 * * *", "7 23 * * *", "47 23 * * *", "37 0 * * *", "27 1 * * *"]'), github.event.schedule) || (github.event_name == 'workflow_dispatch' && (inputs.action_mode == 'analyze' || inputs.action_mode == 'watch_replies'))
     runs-on: ubuntu-latest
     timeout-minutes: 330    # 企画案を送ったあと、13時まで返信を待ち受ける（公開リポジトリなので待ち時間も無料）
     concurrency:            # 返信チェックと同時に動かさない（同じ返信で二重に動画を作らないため）
@@ -71,6 +75,7 @@ jobs:
           DISCORD_ALLOWED_USER_ID: ${{ vars.DISCORD_ALLOWED_USER_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}                         # 返信を受けたら動画生成を起動するため
           WORKFLOW_FILE: auto_pipeline.yml
+          ACTION_MODE: ${{ inputs.action_mode }}                # watch_replies のときは返信の待ち受けだけ行う
         run: python analyze.py
 
   # --- ジョブ2：Discord の返信チェック → 動画生成を起動 ---
