@@ -2041,8 +2041,46 @@ class ShortsPlan(BaseModel):
     shorts: list[Short]
 
 
+def _sim(a: str, b: str) -> float:
+    """2つの文の似ている度合い（0〜1）。文字の2文字ずつの重なりで測る。"""
+    ga = {a[i:i + 2] for i in range(len(a) - 1)}
+    gb = {b[i:i + 2] for i in range(len(b) - 1)}
+    return len(ga & gb) / max(1, len(ga | gb))
+
+
+def _sentences(text: str) -> list[str]:
+    return [x for x in re.split(r"(?<=[。！？!?])", text) if x.strip()]
+
+
+def dedupe_short_scenes(scenes: list) -> list:
+    """ショートの中で同じ文・ほぼ同じ文の繰り返しを取り除く。"""
+    seen: list[str] = []
+    out = []
+    for sc in scenes:
+        keep = []
+        for sent in _sentences(sc.narration):
+            core = re.sub(r"[。！？!?、\s]", "", sent)
+            if len(core) < 2 or any(core == o or _sim(core, o) >= 0.6 for o in seen):
+                continue
+            seen.append(core)
+            keep.append(sent)
+        if keep:
+            sc.narration = "".join(keep).strip()
+            out.append(sc)
+    return out
+
+
+def best_source_scene(narration: str, chosen: int, long_texts: list[str]) -> int:
+    """AI が選んだ本編シーンの話と合っていなければ、話の内容が一番近い本編シーンに直す（映像のずれを防ぐ）。"""
+    scores = [_sim(re.sub(r"[。、！？\s]", "", narration), re.sub(r"[。、！？\s]", "", t)) for t in long_texts]
+    best = max(range(len(scores)), key=lambda i: scores[i])
+    cur = scores[chosen - 1] if 1 <= chosen <= len(scores) else 0.0
+    return best + 1 if scores[best] > cur + 0.08 else chosen
+
+
 def plan_shorts(script: Script) -> list[Short]:
     numbered, no = [], 0
+    long_texts = [sc.narration for ch in script.chapters for sc in ch.scenes]
     for ch in script.chapters:
         numbered.append(f"\n## {ch.title}")
         for sc in ch.scenes:
@@ -2067,12 +2105,13 @@ def plan_shorts(script: Script) -> list[Short]:
 - 説明はテンポよく。1シーンに1つの情報だけ。「〜なんです」「実は」で話をつなぐ。
 - 事実は本編の台本に書かれていることだけを使う。
 - 最後のシーンは「続きは本編で」などの締めのあいさつをしない（終わりの合図になってスワイプされる）。
-  オチを言ったあと、1シーン目にそのまま戻って聞こえる一言で終える（ループして2回目も見てもらうため）。
-  本編への案内は説明欄に自動で入るので、ナレーションには入れない。
+  オチを言ったら短い一言で終える。本編への案内は説明欄に自動で入るので、ナレーションには入れない。
+- 同じ文・同じ言い回しを2回使わない。1シーン目の文を最後にもう一度言うのも禁止。どのシーンも新しい情報を言う。
 - 記号・絵文字・括弧書きは使わない（音声合成で読み上げるため）。
 - FBI・NATO・AI などの英字の略語は、カタカナにせず英字のまま書く。
 - 数字は算用数字で書く（例: 1.5倍、65本、2024年）。
-- source_scene には、そのシーンの内容に最も合う本編シーンの番号を入れる。同じ番号を3回以上続けない。
+- source_scene には、そのシーンのナレーションと同じ内容を話している本編シーンの番号を入れる（映像はその本編シーンのものを使う）。
+  話の内容が違うシーンの番号は入れない。
 - expression は、意外な事実→surprised、問いかけ→thinking、締め→smile、それ以外→normal。1シーン目は surprised。
 - impact は、そのシーンで画面にドンと大きく出す2〜8文字。数字が出るシーンは数字＋単位（例: 100隻、3兆円、2倍）、
   ないシーンは強い一言（例: 実は逆、まさかの理由）。1シーン目は必ず入れる。全体の半分くらいのシーンに入れ、残りは空文字。
@@ -2086,11 +2125,12 @@ def plan_shorts(script: Script) -> list[Short]:
             sc.narration = re.sub(r"[\"“”「」『』（）()【】\[\]*#＊＃~〜]", "", sc.narration).strip()
             if len(sc.narration) < 2:
                 continue
-            sc.source_scene = min(max(sc.source_scene, 1), no)
+            sc.source_scene = best_source_scene(sc.narration, min(max(sc.source_scene, 1), no), long_texts)
             if sc.expression not in EXPRESSIONS:
                 sc.expression = "normal"
             sc.impact = re.sub(r"[\"“”「」『』（）()【】\[\]*#＊＃~〜\s]", "", sc.impact or "")[:10]
             scenes.append(sc)
+        scenes = dedupe_short_scenes(scenes)
         if scenes:
             scenes[0].expression = "surprised"  # 1シーン目は表情でも引きつける
             sh.scenes = scenes
@@ -2102,7 +2142,7 @@ def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) 
     tl, pieces, t = [], [], 0.0
     gap = np.zeros(int(SR * SHORT_GAP), dtype=np.float32)
     font = load_font(SHORT_SUB_FONT_SIZE)
-    used_in_short: set[str] = set()
+    used_time: dict[str, float] = {}   # 素材ごとに、すでに使った秒数（同じ部分を2回見せない）
     for k, sc in enumerate(short.scenes):
         audio, visemes, sub_parts = synth_with_subtitles(tts, sc.narration, font, SW - 90, 3)
         voice = len(audio) / SR
@@ -2111,18 +2151,31 @@ def build_short_timeline(short: Short, tts: TTS, long_tl: list[dict], idx: int) 
             log.warning(f"ショート{idx}: {SHORT_MAX_SEC:.0f}秒を超えるため、残りのシーンを省きます。")
             break
         pieces += [audio, gap]
-        # 1シーンを SHOT_SEC ごとのカットに分け、本編の近くのシーンの絵と交互に見せてテンポを出す
+        # 映像は、ナレーションと同じ話をしている本編シーンのものだけを使う。
+        # 1シーンを SHOT_SEC ごとのカットに分け、同じ素材の続きの部分を寄り・引きを変えて見せる（テンポを出す）。
+        # その素材を使い切ったときだけ、同じ章（同じ話題）の近いシーンの素材を使う。
         src = sc.source_scene - 1
+        chapter = long_tl[src].get("chapter")
+        pool = sorted((i for i in range(len(long_tl)) if long_tl[i].get("chapter") == chapter),
+                      key=lambda i: (abs(i - src), i < src))  # 同じシーン → すぐ後 → すぐ前 → 同じ章の近い順
         n = max(1, int(np.ceil(dur / SHOT_SEC - 0.15)))  # 2.5秒を超えたら切り替える
-        # 同じショートの中で同じ映像を2回使わない：近いシーンから、まだ使っていない素材を選ぶ
-        near = [src + d for d in (0, 1, -1, 2, -2, 3, -3, 4, -4) if 0 <= src + d < len(long_tl)]
-        near = list({long_tl[i]["image"]: long_tl[i] for i in near}.values())
-        fresh = [c for c in near if c["image"] not in used_in_short]
-        cands = fresh[:n] or near[:1]
-        n = len(cands)  # 新しい素材が足りなければ、カット数を減らす（繰り返すより長めに見せる）
-        used_in_short.update(c["image"] for c in cands)
-        shots = [{"offset": j * dur / n, "duration": dur / n, "image": cands[j]["image"],
-                  "video": cands[j].get("video"), "camera": ("zoom_in", "zoom_out")[(k + j) % 2]} for j in range(n)]
+        cut = dur / n
+        shots = []
+        for j in range(n):
+            pick = None
+            for i in pool:
+                c = long_tl[i]
+                length = c["duration"] + FADE if c.get("video") else 1e9  # 写真は何秒でも見せられる
+                if used_time.get(c["image"], 0.0) + cut <= length + 0.2:
+                    pick = c
+                    break
+            if pick is None:  # どれも使い切った：同じシーンの素材を最初から（別の寄り方で）
+                pick = long_tl[src]
+                used_time[pick["image"]] = 0.0
+            start = used_time.get(pick["image"], 0.0)
+            used_time[pick["image"]] = start + cut
+            shots.append({"offset": j * cut, "duration": cut, "image": pick["image"], "video": pick.get("video"),
+                          "clip_start": start, "camera": ("zoom_in", "zoom_out")[(k + j) % 2]})
         tl.append({"index": k, "start": t, "duration": dur, "voice_duration": voice,
                    "narration": sc.narration, "expression": sc.expression, "visemes": visemes,
                    "sub_parts": sub_parts, "camera": shots[0]["camera"], "image": shots[0]["image"],
@@ -2292,7 +2345,7 @@ class ShortRenderer:
                 for k in [k for k in self._clips if k[0] < idx]:
                     self._clips.pop(k).close()
                 self._clips[key] = ClipReader(shot["video"])
-            fr = self._clips[key].frame(int(st * FPS))
+            fr = self._clips[key].frame(int((shot.get("clip_start", 0.0) + st) * FPS))
             if fr is not None:
                 img = fr
         sw, sh = img.size
