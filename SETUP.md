@@ -150,6 +150,8 @@ Actions タブ → 「YouTube Auto-Production Pipeline」→ **Run workflow** �
 | `SUB_FONT_SIZE` | 64 | 本編の字幕の大きさ（ショートは `SHORT_SUB_FONT_SIZE`、既定 72） |
 | `SENIOR_WEEKDAY` | 5 | 企画3を「50歳以上向け」にする曜日（0=月曜…5=土曜、6=日曜、-1で無効）。企画案のジョブの env に追加して変更 |
 | `SELFHELP_WEEKDAY` | 1 | 企画3を「心・考え方の自己啓発」にする曜日（既定は火曜、-1で無効）。企画案のジョブの env に追加して変更 |
+| `IMPERIAL_WEEKDAY` | 3 | 企画3を「天皇家・皇室」にする曜日（既定は木曜、-1で無効） |
+| `POLITICS_WEEKDAY` | 6 | 企画3を「政治」にする曜日（既定は日曜、-1で無効） |
 | `EXCLUDE_KEYWORDS` | なし | 企画にしないジャンルの言葉を追加（カンマ区切り）。スポーツ（特にバスケ）は最初から除外済み |
 | `SHORTS_COUNT` | 2 | 本編と一緒に作るショート動画の本数（0 で作らない） |
 | `SHORT_MAX_SEC` | 35 | ショートの最大の長さ（秒）。短いほど最後まで見られやすい |
