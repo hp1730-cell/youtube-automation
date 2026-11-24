@@ -56,7 +56,12 @@ GEMINI_BUDGET_SEC = float(os.getenv("GEMINI_BUDGET_SEC", "300"))  # 1回の呼�
 
 # Gemini が使えないとき（混雑・上限超過）の予備。企画案と同じ Groq の無料枠を使う
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODELS = [m.strip() for m in os.getenv("GROQ_MODELS", "openai/gpt-oss-120b,llama-3.3-70b-versatile").split(",") if m.strip()]
+# Groq の予備モデル（左から順に試す）。実際に使えるものだけを API の一覧で確かめてから使う
+GROQ_MODELS = [m.strip() for m in (os.getenv("GROQ_MODELS") or
+               "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3-32b,moonshotai/kimi-k2-instruct,"
+               "meta-llama/llama-4-maverick-17b-128e-instruct,llama-3.3-70b-versatile").split(",") if m.strip()]
+GEMINI_TIMEOUT_SEC = int(os.getenv("GEMINI_TIMEOUT_SEC", "480"))  # これ以上返事がなければあきらめて次へ（固まり防止）
+GROQ_TPM = int(os.getenv("GROQ_TPM", "8000"))                      # 無料枠の1分あたりのトークン上限（送る量＋返す量）
 
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 # 任意（動画素材をもっと増やしたいとき。無料・カード不要）。貼り付け時に混ざった空白・改行・全角文字は取り除く
@@ -156,7 +161,9 @@ def gemini_client():
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が設定されていません。")
     from google import genai
-    return genai.Client(api_key=GEMINI_API_KEY)
+    from google.genai import types
+    # 返事が来ないまま何時間も固まらないよう、1回の問い合わせに時間制限を付ける（単位はミリ秒）
+    return genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_SEC * 1000))
 
 
 _DEAD_MODELS: set[str] = set()      # 404 などで使えなかったモデル
@@ -221,6 +228,9 @@ def call_gemini(prompt: str, config, label: str, budget_sec: float = GEMINI_BUDG
                             log.info(f"エラーで案内された後継モデル {nxt} を試します。")
                             queue.insert(0, nxt)
                     break
+                if "timed out" in msg.lower() or "timeout" in type(e).__name__.lower() \
+                        or "disconnected" in msg.lower():
+                    break  # 返事が来なかった：同じモデルで待ち直さず、次のモデル（だめなら Groq）へ
                 if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
                     if attempt >= 1:
                         break          # 上限超過は1回だけ待って再試行し、だめなら次のモデルへ
@@ -236,26 +246,51 @@ def call_gemini(prompt: str, config, label: str, budget_sec: float = GEMINI_BUDG
 
 # ---------- Groq（Gemini が使えないときの予備。無料枠あり） ----------
 
+_GROQ_AVAILABLE: list[str] | None = None
+
+
+def groq_models(client) -> list[str]:
+    """GROQ_MODELS のうち、今 Groq で実際に使えるモデルだけを返す（廃止されたモデルで時間を無駄にしない）。"""
+    global _GROQ_AVAILABLE
+    if _GROQ_AVAILABLE is None:
+        try:
+            ids = {m.id for m in client.models.list().data}
+            _GROQ_AVAILABLE = [m for m in GROQ_MODELS if m in ids] or GROQ_MODELS
+            gone = [m for m in GROQ_MODELS if m not in ids]
+            if gone:
+                log.info(f"Groq で使えないモデルを外しました: {', '.join(gone)}")
+        except Exception as e:
+            log.warning(f"Groq のモデル一覧を取得できませんでした: {e}")
+            _GROQ_AVAILABLE = GROQ_MODELS
+    return _GROQ_AVAILABLE
+
+
 def call_groq(prompt: str, label: str, temperature: float, json_mode: bool) -> str:
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY が設定されていません。")
     from groq import Groq
-    client = Groq(api_key=GROQ_API_KEY)
+    client = Groq(api_key=GROQ_API_KEY, timeout=300, max_retries=1)
     last_err = None
-    for model in GROQ_MODELS:
+    # 送る量＋返す量が無料枠の上限を超えると 413 になるので、返す量の上限を文章の長さに合わせて決める
+    prompt_tokens = int(len(prompt) * 0.9) + 200
+    max_out = max(2048, min(16000, GROQ_TPM - prompt_tokens))
+    for model in groq_models(client):
         for attempt in range(2):
             try:
                 log.info(f"Groq（{model}）: {label}（試行 {attempt + 1}）")
                 kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
                 r = client.chat.completions.create(
                     model=model, messages=[{"role": "user", "content": prompt}],
-                    temperature=temperature, max_completion_tokens=16000, **kwargs)
+                    temperature=temperature, max_completion_tokens=max_out, **kwargs)
                 text = (r.choices[0].message.content or "").strip()
                 if text:
                     return text
             except Exception as e:
                 last_err = e
-                log.warning(f"Groq エラー: {str(e)[:200]}")
+                msg = str(e)
+                log.warning(f"Groq エラー: {msg[:200]}")
+                if "413" in msg or "404" in msg or "does not exist" in msg:
+                    break  # このモデルでは無理なので、すぐ次のモデルへ
                 time.sleep(20)
     raise RuntimeError(f"Groq の呼び出しに失敗しました（{label}）: {last_err}")
 
