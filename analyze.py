@@ -332,20 +332,55 @@ def extract_plans(data) -> list[dict]:
     return []
 
 
+PLAN_MODELS = [m.strip() for m in (os.getenv("PLAN_MODELS") or
+               f"{GROQ_MODEL},openai/gpt-oss-20b,qwen/qwen3-32b").split(",") if m.strip()]
+
+
+def _salvage(e: Exception) -> str:
+    """Groq が「JSON の形が崩れた」と断ったときも、エラーに途中まで書けた文章が付いているので取り出す。"""
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error", body)
+        if isinstance(err, dict):
+            return err.get("failed_generation") or ""
+    return ""
+
+
 def generate_plans(prompt: str) -> list[dict]:
+    """企画案を作る。JSON の形が崩れたなどで失敗しても、モデル・設定を変えて何度か作り直す。"""
+    import time
     from groq import Groq
-    client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    completion = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.8,
-        response_format={"type": "json_object"},
-    )
-    raw = completion.choices[0].message.content or ""
-    plans = extract_plans(json.loads(repair_json(raw)))
-    if not plans:
-        raise RuntimeError(f"企画案を解析できませんでした: {raw[:300]}")
-    return plans[:3]
+    client = Groq(api_key=os.environ["GROQ_API_KEY"], timeout=180, max_retries=1)
+    tries = [(m, json_mode, temp) for m in dict.fromkeys(PLAN_MODELS)
+             for json_mode, temp in ((True, 0.8), (False, 0.6))]
+    last = None
+    for model, json_mode, temp in tries:
+        raw = ""
+        try:
+            kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+            completion = client.chat.completions.create(
+                model=model, messages=[{"role": "user", "content": prompt + (
+                    "" if json_mode else "\n\n出力は JSON だけにしてください（説明文やコードブロックの記号は付けない）。")}],
+                temperature=temp, **kwargs)
+            raw = completion.choices[0].message.content or ""
+        except Exception as e:
+            last = e
+            raw = _salvage(e)
+            log.warning(f"企画生成エラー（{model}）: {str(e)[:160]}")
+            if not raw:
+                if "404" in str(e) or "does not exist" in str(e):
+                    continue
+                time.sleep(5)
+                continue
+        try:
+            text = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M)
+            plans = extract_plans(json.loads(repair_json(text)))
+        except Exception as e:
+            plans, last = [], e
+        if plans:
+            return plans[:3]
+        log.warning(f"企画案を読み取れなかったため作り直します（{model}）: {raw[:150]}")
+    raise RuntimeError(f"企画案を作れませんでした: {last}")
 
 
 def generate_valid_plans(prompt: str, past: list[str] | None = None) -> list[dict]:
